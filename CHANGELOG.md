@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.2.0...v0.2.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* keep runtime version aligned with package ([b3eb754](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b3eb754c98416dd1d0b467691949e61bd679cb88))
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.1.0...v0.2.0) (2026-07-15)
 
 
