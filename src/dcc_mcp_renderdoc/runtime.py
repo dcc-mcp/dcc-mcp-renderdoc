@@ -275,6 +275,9 @@ def _visible_process_id(process_name: str) -> Optional[int]:
 
 
 def _visible_processes(limit: int = 64) -> list[dict[str, Any]]:
+    if sys.platform != "win32":
+        return []
+
     import ctypes
     from ctypes import wintypes
 
@@ -312,8 +315,6 @@ def _visible_processes(limit: int = 64) -> list[dict[str, Any]]:
 def _capture_failure_diagnostics(
     *, process_id: Optional[int], process_name: Optional[str], focused: bool
 ) -> str:
-    if sys.platform != "win32":
-        return f"focused_target_window={focused}"
     visible = _visible_processes()
     if process_id is not None:
         match = next((process for process in visible if process["process_id"] == process_id), None)
