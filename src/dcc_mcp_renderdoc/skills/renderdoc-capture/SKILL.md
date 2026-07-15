@@ -21,5 +21,10 @@ metadata:
 # RenderDoc Capture
 
 Call `get_version` before capture. `capture_program` starts only the explicit executable and
-arguments, never a shell. The target must trigger a RenderDoc frame capture.
+arguments, never a shell. Set `trigger_after_secs` to trigger F12 automatically on Windows.
+When using `hook_children`, set `trigger_process_name` to the child executable that should receive
+focus before F12.
 
+Use `capture_process` when Steam or another platform client must launch the target first. It
+injects into the explicit PID, focuses that visible window, triggers F12 after the requested delay,
+and waits for the resulting capture. Neither tool terminates the target process.

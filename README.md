@@ -24,12 +24,19 @@ On Windows, set the variable to `renderdoccmd.exe`.
 ## Agent workflows
 
 - Launch a game or test executable under RenderDoc and wait for a typed `.rdc` capture.
+- Trigger F12 automatically after a configurable delay, with optional child-process window focus.
+- Inject into a visible Windows process that had to be launched by a platform client, then trigger and collect a capture.
 - Inspect capture driver, machine identity, chunk version, API-call counts, and representative calls.
 - Export a capture thumbnail for visual review.
 - Export Chrome trace JSON for timeline tooling.
 
 The capture tool launches only the explicit executable and arguments supplied by the caller. It
 never invokes a shell. Analysis tools are read-only with respect to the `.rdc` input.
+
+For interactive Windows programs, pass `trigger_after_secs` to `capture_program`. When a launcher
+creates the rendered child process, also pass `trigger_process_name`. Use `capture_process` only
+when the target is already running; late injection may not capture graphics devices created before
+RenderDoc was attached.
 
 ## Real CI
 
@@ -48,4 +55,3 @@ uv run python tools/lint_skills.py
 
 RenderDoc is an MIT-licensed graphics debugger maintained independently at
 [renderdoc.org](https://renderdoc.org/). This adapter is not affiliated with the RenderDoc project.
-

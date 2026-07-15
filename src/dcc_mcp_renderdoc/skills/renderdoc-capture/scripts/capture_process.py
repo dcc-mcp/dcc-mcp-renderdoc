@@ -1,34 +1,26 @@
 from dcc_mcp_core.skill import skill_entry, skill_success
 
-from dcc_mcp_renderdoc.runtime import capture_program
+from dcc_mcp_renderdoc.runtime import capture_process
 
 
 @skill_entry
 def main(
-    executable: str,
+    process_id: int,
     output_template: str,
-    arguments=None,
     working_directory=None,
-    wait_for_exit: bool = True,
-    api_validation: bool = False,
-    hook_children: bool = False,
-    trigger_after_secs=None,
-    trigger_process_name=None,
+    trigger_after_secs: float = 2.0,
     capture_wait_secs: int = 30,
-    timeout_secs: int = 300,
+    api_validation: bool = False,
+    timeout_secs: int = 60,
     **_kwargs,
 ):
-    result = capture_program(
-        executable,
+    result = capture_process(
+        process_id,
         output_template,
-        arguments=arguments,
         working_directory=working_directory,
-        wait_for_exit=wait_for_exit,
-        api_validation=api_validation,
-        hook_children=hook_children,
         trigger_after_secs=trigger_after_secs,
-        trigger_process_name=trigger_process_name,
         capture_wait_secs=capture_wait_secs,
+        api_validation=api_validation,
         timeout_secs=timeout_secs,
     )
     return skill_success(f"Created {len(result['captures'])} RenderDoc capture(s).", **result)

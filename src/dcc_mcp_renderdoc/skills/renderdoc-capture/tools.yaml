@@ -29,6 +29,9 @@ tools:
         wait_for_exit: {type: boolean, default: true}
         api_validation: {type: boolean, default: false}
         hook_children: {type: boolean, default: false}
+        trigger_after_secs: {type: number, minimum: 0, maximum: 600}
+        trigger_process_name: {type: string, minLength: 1, maxLength: 260}
+        capture_wait_secs: {type: integer, minimum: 1, maximum: 600, default: 30}
         timeout_secs: {type: integer, minimum: 1, maximum: 3600, default: 300}
       additionalProperties: false
     output_schema: {type: object}
@@ -42,4 +45,28 @@ tools:
     next-tools:
       on-success: [renderdoc_analysis__inspect_capture, renderdoc_analysis__export_thumbnail]
       on-failure: [dcc_diagnostics__audit_log]
-
+  - name: capture_process
+    description: Inject RenderDoc into one visible Windows process, focus its window, trigger F12 after a delay, and return the new .rdc file. Use when a game must be launched by its platform client. Not for hidden services or process termination.
+    input_schema:
+      type: object
+      required: [process_id, output_template]
+      properties:
+        process_id: {type: integer, minimum: 1}
+        output_template: {type: string, minLength: 1, maxLength: 1000}
+        working_directory: {type: string, maxLength: 1000}
+        trigger_after_secs: {type: number, minimum: 0, maximum: 600, default: 2}
+        capture_wait_secs: {type: integer, minimum: 1, maximum: 600, default: 30}
+        api_validation: {type: boolean, default: false}
+        timeout_secs: {type: integer, minimum: 1, maximum: 600, default: 60}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: false
+    destructive: false
+    idempotent: false
+    execution: async
+    affinity: any
+    timeout_hint_secs: 660
+    source_file: scripts/capture_process.py
+    next-tools:
+      on-success: [renderdoc_analysis__inspect_capture, renderdoc_analysis__export_thumbnail]
+      on-failure: [dcc_diagnostics__audit_log]
