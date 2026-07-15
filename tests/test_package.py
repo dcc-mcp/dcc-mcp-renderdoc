@@ -1,5 +1,7 @@
+import re
 from pathlib import Path
 
+from dcc_mcp_renderdoc import __version__
 from dcc_mcp_renderdoc.server import RenderDocMcpServer
 
 
@@ -20,3 +22,10 @@ def test_bundled_skills_and_release_workflow_exist():
         "renderdoc-capture",
     }
     assert (root / ".github" / "workflows" / "release.yml").is_file()
+
+
+def test_runtime_version_matches_distribution_metadata():
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    project_version = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+    assert project_version is not None
+    assert __version__ == project_version.group(1)
