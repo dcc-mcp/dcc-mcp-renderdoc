@@ -8,7 +8,7 @@
 
 #include "renderdoc_app.h"
 
-int main(void) {
+int main(int argc, char **argv) {
     Display *display = XOpenDisplay(NULL);
     int attributes[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24, None};
     XVisualInfo *visual = display ? glXChooseVisual(display, DefaultScreen(display), attributes) : NULL;
@@ -28,20 +28,21 @@ int main(void) {
     pRENDERDOC_GetAPI get_api = (pRENDERDOC_GetAPI)dlsym(RTLD_DEFAULT, "RENDERDOC_GetAPI");
     RENDERDOC_API_1_1_2 *api = NULL;
     if (!get_api || !get_api(eRENDERDOC_API_Version_1_1_2, (void **)&api)) return 3;
-    api->TriggerCapture();
-    for (int frame = 0; frame < 3; ++frame) {
-        glViewport(0, 0, 320, 200);
-        glClearColor(0.1f, 0.4f, 0.8f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glXSwapBuffers(display, window);
-        glFinish();
-        usleep(100000);
-    }
+    if (argc > 1) api->SetCaptureFilePathTemplate(argv[1]);
+    api->StartFrameCapture(NULL, NULL);
+    if (!api->IsFrameCapturing()) return 4;
+    glViewport(0, 0, 320, 200);
+    glClearColor(0.1f, 0.4f, 0.8f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glXSwapBuffers(display, window);
+    glFinish();
+    if (!api->EndFrameCapture(NULL, NULL)) return 5;
+    usleep(200000);
 
     glXMakeCurrent(display, None, NULL);
     glXDestroyContext(display, context);
     XDestroyWindow(display, window);
     XCloseDisplay(display);
-    puts("captured");
+    printf("captured=%u\n", api->GetNumCaptures());
     return 0;
 }

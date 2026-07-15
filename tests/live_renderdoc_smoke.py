@@ -102,6 +102,7 @@ def main() -> None:
             {
                 "executable": program,
                 "output_template": str(artifacts / "smoke"),
+                "arguments": [str(artifacts / "smoke")],
                 "working_directory": str(Path(program).parent),
             },
         )
