@@ -29,6 +29,13 @@ int main(int argc, char **argv) {
     RENDERDOC_API_1_1_2 *api = NULL;
     if (!get_api || !get_api(eRENDERDOC_API_Version_1_1_2, (void **)&api)) return 3;
     if (argc > 1) api->SetCaptureFilePathTemplate(argv[1]);
+
+    glViewport(0, 0, 320, 200);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glXSwapBuffers(display, window);
+    glFinish();
+
     api->StartFrameCapture(NULL, NULL);
     if (!api->IsFrameCapturing()) return 4;
     glViewport(0, 0, 320, 200);
