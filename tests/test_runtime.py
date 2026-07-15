@@ -52,6 +52,82 @@ def test_capture_program_uses_argument_vector_and_reports_new_capture(tmp_path, 
     assert result["captures"] == [str((tmp_path / "capture_frame1.rdc").resolve())]
 
 
+def test_non_waiting_launch_accepts_renderdoc_target_id(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd.exe"
+    command.touch()
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(args[0], 12345, "Launched as ID 12345", ""),
+    )
+
+    result = runtime._run(
+        ["capture", "game.exe"],
+        timeout_secs=10,
+        command=str(command),
+        accept_launched_id=True,
+    )
+
+    assert result.returncode == 12345
+
+
+def test_capture_process_injects_triggers_and_reports_capture(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_run(arguments, **kwargs):
+        observed["arguments"] = arguments
+        observed["accept_launched_id"] = kwargs["accept_launched_id"]
+        return CompletedProcess(arguments, 456, "Launched as ID 456", "")
+
+    monkeypatch.setattr(runtime, "_run", fake_run)
+    monkeypatch.setattr(runtime, "_trigger_capture_hotkey", lambda pid: pid == 42)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        runtime,
+        "_wait_for_captures",
+        lambda directory, before, timeout: [tmp_path / "capture_frame1.rdc"],
+    )
+
+    result = runtime.capture_process(42, str(tmp_path / "capture"))
+
+    assert observed["arguments"][:2] == ["inject", "--PID=42"]
+    assert observed["accept_launched_id"] is True
+    assert result["focused_target_window"] is True
+
+
+def test_capture_program_focuses_requested_child_before_trigger(tmp_path, monkeypatch):
+    target = tmp_path / "launcher.exe"
+    target.touch()
+    observed = {}
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda arguments, **kwargs: CompletedProcess(arguments, 123, "Launched as ID 123", ""),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(runtime, "_wait_for_visible_process", lambda name, timeout: 77)
+    monkeypatch.setattr(
+        runtime,
+        "_trigger_capture_hotkey",
+        lambda pid: observed.setdefault("pid", pid) == 77,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_wait_for_captures",
+        lambda directory, before, timeout: [tmp_path / "capture_frame1.rdc"],
+    )
+
+    result = runtime.capture_program(
+        str(target),
+        str(tmp_path / "capture"),
+        trigger_after_secs=1,
+        trigger_process_name="game.exe",
+    )
+
+    assert observed["pid"] == 77
+    assert result["focused_target_window"] is True
+
+
 def test_invalid_capture_is_rejected(tmp_path: Path):
     with pytest.raises(runtime.RenderDocError, match="not .rdc"):
         runtime.inspect_capture(str(tmp_path / "missing.rdc"))

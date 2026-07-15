@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
@@ -39,6 +42,7 @@ def _run(
     *,
     timeout_secs: int,
     command: Optional[str] = None,
+    accept_launched_id: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     executable = resolve_renderdoccmd(command)
     try:
@@ -56,7 +60,13 @@ def _run(
         raise RenderDocError(f"Could not start RenderDoc: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
-        raise RenderDocError(f"RenderDoc exited with code {result.returncode}: {detail}")
+        launched = re.search(r"Launched as ID (\d+)", detail)
+        if not (
+            accept_launched_id
+            and launched is not None
+            and int(launched.group(1)) == result.returncode
+        ):
+            raise RenderDocError(f"RenderDoc exited with code {result.returncode}: {detail}")
     return result
 
 
@@ -75,6 +85,9 @@ def capture_program(
     wait_for_exit: bool = True,
     api_validation: bool = False,
     hook_children: bool = False,
+    trigger_after_secs: Optional[float] = None,
+    trigger_process_name: Optional[str] = None,
+    capture_wait_secs: int = 30,
     timeout_secs: int = 300,
     command: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -90,32 +103,186 @@ def capture_program(
 
     before = {path.resolve() for path in output.parent.glob("*.rdc")}
     cli_args = ["capture", "--working-dir", str(cwd), "--capture-file", str(output)]
-    if wait_for_exit:
+    effective_wait_for_exit = wait_for_exit and trigger_after_secs is None
+    if effective_wait_for_exit:
         cli_args.append("--wait-for-exit")
     if api_validation:
         cli_args.append("--opt-api-validation")
     if hook_children:
         cli_args.append("--opt-hook-children")
     cli_args.extend([str(target), *(str(value) for value in arguments or [])])
-    result = _run(cli_args, timeout_secs=timeout_secs, command=command)
-
-    captures = sorted(
-        (path.resolve() for path in output.parent.glob("*.rdc") if path.resolve() not in before),
-        key=lambda path: path.stat().st_mtime_ns,
+    result = _run(
+        cli_args,
+        timeout_secs=timeout_secs,
+        command=command,
+        accept_launched_id=not effective_wait_for_exit,
     )
+    if trigger_after_secs is not None:
+        time.sleep(max(0.0, trigger_after_secs))
+        target_pid = _wait_for_visible_process(
+            trigger_process_name or target.name,
+            min(capture_wait_secs, 30),
+        )
+        focused = _trigger_capture_hotkey(target_pid)
+        captures = _wait_for_captures(output.parent, before, capture_wait_secs)
+    else:
+        focused = False
+        captures = _new_captures(output.parent, before)
     if not captures:
         output_detail = "\n".join(
             part.strip() for part in (result.stdout, result.stderr) if part.strip()
         )[-2000:]
         raise RenderDocError(
-            "The target exited without creating a new .rdc capture; ensure it presents a frame "
-            f"or uses RenderDoc's in-application capture API. RenderDoc output: {output_detail}"
+            "No new .rdc capture appeared; ensure the target presents a frame and was hooked "
+            f"before creating its graphics device. RenderDoc output: {output_detail}"
         )
     return {
         "target": str(target),
         "captures": [str(path) for path in captures],
+        "focused_target_window": focused,
         "stdout": result.stdout.strip(),
     }
+
+
+def capture_process(
+    process_id: int,
+    output_template: str,
+    *,
+    working_directory: Optional[str] = None,
+    trigger_after_secs: float = 2.0,
+    capture_wait_secs: int = 30,
+    api_validation: bool = False,
+    timeout_secs: int = 60,
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Inject into one live process, trigger F12, and return the new capture."""
+    if process_id <= 0:
+        raise RenderDocError("Process ID must be a positive integer")
+    output = Path(output_template).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    before = {path.resolve() for path in output.parent.glob("*.rdc")}
+    cli_args = ["inject", f"--PID={process_id}", "--capture-file", str(output)]
+    if working_directory:
+        cwd = Path(working_directory).expanduser().resolve()
+        if not cwd.is_dir():
+            raise RenderDocError(f"Working directory does not exist: {cwd}")
+        cli_args.extend(["--working-dir", str(cwd)])
+    if api_validation:
+        cli_args.append("--opt-api-validation")
+    result = _run(
+        cli_args,
+        timeout_secs=timeout_secs,
+        command=command,
+        accept_launched_id=True,
+    )
+    time.sleep(max(0.0, trigger_after_secs))
+    focused = _trigger_capture_hotkey(process_id)
+    captures = _wait_for_captures(output.parent, before, capture_wait_secs)
+    if not captures:
+        raise RenderDocError(
+            "No .rdc capture appeared after injection and F12; ensure the target window is visible "
+            "and uses a graphics API supported by RenderDoc"
+        )
+    return {
+        "process_id": process_id,
+        "captures": [str(path) for path in captures],
+        "focused_target_window": focused,
+        "stdout": result.stdout.strip(),
+    }
+
+
+def _new_captures(directory: Path, before: set[Path]) -> list[Path]:
+    return sorted(
+        (path.resolve() for path in directory.glob("*.rdc") if path.resolve() not in before),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+
+
+def _wait_for_captures(directory: Path, before: set[Path], timeout_secs: int) -> list[Path]:
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        captures = _new_captures(directory, before)
+        if captures:
+            return captures
+        time.sleep(0.25)
+    return []
+
+
+def _trigger_capture_hotkey(process_id: Optional[int] = None) -> bool:
+    if sys.platform != "win32":
+        raise RenderDocError("Automatic F12 capture triggering is currently supported on Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    target = wintypes.HWND()
+    if process_id is not None:
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        @callback_type
+        def find_window(window, _extra):
+            nonlocal target
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+            if owner.value == process_id and user32.IsWindowVisible(window):
+                target = window
+                return False
+            return True
+
+        user32.EnumWindows(find_window, 0)
+        if target:
+            user32.SetForegroundWindow(target)
+            time.sleep(0.15)
+    user32.keybd_event(0x7B, 0, 0, 0)
+    user32.keybd_event(0x7B, 0, 2, 0)
+    return bool(target)
+
+
+def _wait_for_visible_process(process_name: str, timeout_secs: int) -> Optional[int]:
+    if sys.platform != "win32":
+        return None
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        process_id = _visible_process_id(process_name)
+        if process_id is not None:
+            return process_id
+        time.sleep(0.25)
+    return None
+
+
+def _visible_process_id(process_name: str) -> Optional[int]:
+    import ctypes
+    from ctypes import wintypes
+
+    expected = Path(process_name).name.casefold()
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    found: Optional[int] = None
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @callback_type
+    def find_window(window, _extra):
+        nonlocal found
+        if not user32.IsWindowVisible(window):
+            return True
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        process = kernel32.OpenProcess(0x1000, False, owner.value)
+        if not process:
+            return True
+        try:
+            size = wintypes.DWORD(32768)
+            path = ctypes.create_unicode_buffer(size.value)
+            if kernel32.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+                if Path(path.value).name.casefold() == expected:
+                    found = owner.value
+                    return False
+        finally:
+            kernel32.CloseHandle(process)
+        return True
+
+    user32.EnumWindows(find_window, 0)
+    return found
 
 
 def _require_capture(capture_file: str) -> Path:
