@@ -25,7 +25,14 @@ def test_bundled_skills_and_release_workflow_exist():
 
 
 def test_runtime_version_matches_distribution_metadata():
-    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    root = Path(__file__).parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     project_version = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
     assert project_version is not None
     assert __version__ == project_version.group(1)
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    locked_project = re.search(
+        r'\[\[package\]\]\s+name = "dcc-mcp-renderdoc"\s+version = "([^"]+)"', lock
+    )
+    assert locked_project is not None
+    assert __version__ == locked_project.group(1)
