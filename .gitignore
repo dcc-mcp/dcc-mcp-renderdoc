@@ -1,0 +1,12 @@
+.venv/
+.renderdoc-bin/
+artifacts/
+dist/
+build/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+tests/renderdoc_smoke
+tests/renderdoc_smoke.exe
+
