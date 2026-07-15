@@ -117,6 +117,7 @@ def capture_program(
         command=command,
         accept_launched_id=not effective_wait_for_exit,
     )
+    target_pid: Optional[int] = None
     if trigger_after_secs is not None:
         time.sleep(max(0.0, trigger_after_secs))
         target_pid = _wait_for_visible_process(
@@ -132,9 +133,15 @@ def capture_program(
         output_detail = "\n".join(
             part.strip() for part in (result.stdout, result.stderr) if part.strip()
         )[-2000:]
+        diagnostics = _capture_failure_diagnostics(
+            process_id=target_pid,
+            process_name=trigger_process_name or target.name,
+            focused=focused,
+        )
         raise RenderDocError(
             "No new .rdc capture appeared; ensure the target presents a frame and was hooked "
-            f"before creating its graphics device. RenderDoc output: {output_detail}"
+            f"before creating its graphics device. {diagnostics}. "
+            f"RenderDoc output: {output_detail}"
         )
     return {
         "target": str(target),
@@ -179,9 +186,18 @@ def capture_process(
     focused = _trigger_capture_hotkey(process_id)
     captures = _wait_for_captures(output.parent, before, capture_wait_secs)
     if not captures:
+        output_detail = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )[-2000:]
+        diagnostics = _capture_failure_diagnostics(
+            process_id=process_id,
+            process_name=None,
+            focused=focused,
+        )
         raise RenderDocError(
             "No .rdc capture appeared after injection and F12; ensure the target window is visible "
-            "and uses a graphics API supported by RenderDoc"
+            f"and uses a graphics API supported by RenderDoc. {diagnostics}. "
+            f"RenderDoc output: {output_detail}"
         )
     return {
         "process_id": process_id,
@@ -251,22 +267,31 @@ def _wait_for_visible_process(process_name: str, timeout_secs: int) -> Optional[
 
 
 def _visible_process_id(process_name: str) -> Optional[int]:
+    expected = Path(process_name).name.casefold()
+    for process in _visible_processes():
+        if process["name"].casefold() == expected:
+            return int(process["process_id"])
+    return None
+
+
+def _visible_processes(limit: int = 64) -> list[dict[str, Any]]:
     import ctypes
     from ctypes import wintypes
 
-    expected = Path(process_name).name.casefold()
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    found: Optional[int] = None
+    found: list[dict[str, Any]] = []
+    seen: set[int] = set()
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     @callback_type
     def find_window(window, _extra):
-        nonlocal found
-        if not user32.IsWindowVisible(window):
+        if not user32.IsWindowVisible(window) or len(found) >= limit:
             return True
         owner = wintypes.DWORD()
         user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if not owner.value or owner.value in seen:
+            return True
         process = kernel32.OpenProcess(0x1000, False, owner.value)
         if not process:
             return True
@@ -274,15 +299,34 @@ def _visible_process_id(process_name: str) -> Optional[int]:
             size = wintypes.DWORD(32768)
             path = ctypes.create_unicode_buffer(size.value)
             if kernel32.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
-                if Path(path.value).name.casefold() == expected:
-                    found = owner.value
-                    return False
+                seen.add(owner.value)
+                found.append({"process_id": owner.value, "name": Path(path.value).name})
         finally:
             kernel32.CloseHandle(process)
         return True
 
     user32.EnumWindows(find_window, 0)
     return found
+
+
+def _capture_failure_diagnostics(
+    *, process_id: Optional[int], process_name: Optional[str], focused: bool
+) -> str:
+    if sys.platform != "win32":
+        return f"focused_target_window={focused}"
+    visible = _visible_processes()
+    if process_id is not None:
+        match = next((process for process in visible if process["process_id"] == process_id), None)
+        target = f"{match['name']}(pid={process_id})" if match else f"pid={process_id}:not-visible"
+    else:
+        target = f"{Path(process_name).name}:not-found" if process_name else "not-found"
+    snapshot = ", ".join(
+        f"{process['name']}(pid={process['process_id']})" for process in visible[:20]
+    )
+    return (
+        f"target_process={target}; focused_target_window={focused}; "
+        f"visible_processes=[{snapshot or 'none'}]"
+    )
 
 
 def _require_capture(capture_file: str) -> Path:

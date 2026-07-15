@@ -128,6 +128,65 @@ def test_capture_program_focuses_requested_child_before_trigger(tmp_path, monkey
     assert result["focused_target_window"] is True
 
 
+def test_capture_program_failure_reports_missing_child_diagnostics(tmp_path, monkeypatch):
+    target = tmp_path / "launcher.exe"
+    target.touch()
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda arguments, **kwargs: CompletedProcess(arguments, 123, "Launched as ID 123", ""),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(runtime, "_wait_for_visible_process", lambda name, timeout: None)
+    monkeypatch.setattr(runtime, "_trigger_capture_hotkey", lambda pid: False)
+    monkeypatch.setattr(runtime, "_wait_for_captures", lambda directory, before, timeout: [])
+    monkeypatch.setattr(
+        runtime,
+        "_visible_processes",
+        lambda: [{"process_id": 12, "name": "launcher.exe"}],
+    )
+
+    with pytest.raises(runtime.RenderDocError) as error:
+        runtime.capture_program(
+            str(target),
+            str(tmp_path / "capture"),
+            trigger_after_secs=1,
+            trigger_process_name="game.exe",
+        )
+
+    message = str(error.value)
+    assert "target_process=game.exe:not-found" in message
+    assert "focused_target_window=False" in message
+    assert "visible_processes=[launcher.exe(pid=12)]" in message
+    assert "RenderDoc output: Launched as ID 123" in message
+
+
+def test_capture_process_failure_reports_injection_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda arguments, **kwargs: CompletedProcess(
+            arguments, 42, "Launched as ID 42", "inject warning"
+        ),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(runtime, "_trigger_capture_hotkey", lambda pid: False)
+    monkeypatch.setattr(runtime, "_wait_for_captures", lambda directory, before, timeout: [])
+    monkeypatch.setattr(
+        runtime,
+        "_visible_processes",
+        lambda: [{"process_id": 42, "name": "game.exe"}],
+    )
+
+    with pytest.raises(runtime.RenderDocError) as error:
+        runtime.capture_process(42, str(tmp_path / "capture"))
+
+    message = str(error.value)
+    assert "target_process=game.exe(pid=42)" in message
+    assert "focused_target_window=False" in message
+    assert "RenderDoc output: Launched as ID 42\ninject warning" in message
+
+
 def test_invalid_capture_is_rejected(tmp_path: Path):
     with pytest.raises(runtime.RenderDocError, match="not .rdc"):
         runtime.inspect_capture(str(tmp_path / "missing.rdc"))
