@@ -8,11 +8,23 @@
 
 #include "renderdoc_app.h"
 
+#define GLX_CONTEXT_MAJOR_VERSION_ARB 0x2091
+#define GLX_CONTEXT_MINOR_VERSION_ARB 0x2092
+#define GLX_CONTEXT_PROFILE_MASK_ARB 0x9126
+#define GLX_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
+
+typedef GLXContext (*CreateContextAttribs)(Display *, GLXFBConfig, GLXContext, Bool, const int *);
+
 int main(int argc, char **argv) {
     Display *display = XOpenDisplay(NULL);
-    int attributes[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24, None};
-    XVisualInfo *visual = display ? glXChooseVisual(display, DefaultScreen(display), attributes) : NULL;
-    if (!display || !visual) return 2;
+    int count = 0;
+    int attributes[] = {GLX_X_RENDERABLE, True, GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT,
+                        GLX_RENDER_TYPE, GLX_RGBA_BIT, GLX_DOUBLEBUFFER, True, None};
+    GLXFBConfig *configs = display ? glXChooseFBConfig(display, DefaultScreen(display), attributes, &count) : NULL;
+    XVisualInfo *visual = count > 0 ? glXGetVisualFromFBConfig(display, configs[0]) : NULL;
+    CreateContextAttribs create_context =
+        (CreateContextAttribs)glXGetProcAddressARB((const GLubyte *)"glXCreateContextAttribsARB");
+    if (!display || !visual || !create_context) return 2;
 
     Window root = RootWindow(display, visual->screen);
     Colormap color_map = XCreateColormap(display, root, visual->visual, AllocNone);
@@ -21,7 +33,11 @@ int main(int argc, char **argv) {
     window_attributes.event_mask = ExposureMask;
     Window window = XCreateWindow(display, root, 0, 0, 320, 200, 0, visual->depth, InputOutput,
                                   visual->visual, CWColormap | CWEventMask, &window_attributes);
-    GLXContext context = glXCreateContext(display, visual, NULL, True);
+    int context_attributes[] = {GLX_CONTEXT_MAJOR_VERSION_ARB, 3, GLX_CONTEXT_MINOR_VERSION_ARB, 2,
+                                GLX_CONTEXT_PROFILE_MASK_ARB, GLX_CONTEXT_CORE_PROFILE_BIT_ARB, None};
+    GLXContext context = create_context(display, configs[0], NULL, True, context_attributes);
+    XFree(configs);
+    if (!context) return 2;
     XMapWindow(display, window);
     glXMakeCurrent(display, window, context);
 
