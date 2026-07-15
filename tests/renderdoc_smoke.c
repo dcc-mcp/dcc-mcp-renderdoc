@@ -2,6 +2,7 @@
 #include <GL/glx.h>
 #include <X11/Xlib.h>
 #include <dlfcn.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 #include "renderdoc_app.h"
@@ -40,4 +41,3 @@ int main(void) {
     puts("captured");
     return 0;
 }
-
