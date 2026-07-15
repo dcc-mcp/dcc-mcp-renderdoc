@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "renderdoc_app.h"
 
@@ -27,12 +28,15 @@ int main(void) {
     pRENDERDOC_GetAPI get_api = (pRENDERDOC_GetAPI)dlsym(RTLD_DEFAULT, "RENDERDOC_GetAPI");
     RENDERDOC_API_1_1_2 *api = NULL;
     if (!get_api || !get_api(eRENDERDOC_API_Version_1_1_2, (void **)&api)) return 3;
-    api->StartFrameCapture(NULL, NULL);
-    glViewport(0, 0, 320, 200);
-    glClearColor(0.1f, 0.4f, 0.8f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glXSwapBuffers(display, window);
-    api->EndFrameCapture(NULL, NULL);
+    api->TriggerCapture();
+    for (int frame = 0; frame < 3; ++frame) {
+        glViewport(0, 0, 320, 200);
+        glClearColor(0.1f, 0.4f, 0.8f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glXSwapBuffers(display, window);
+        glFinish();
+        usleep(100000);
+    }
 
     glXMakeCurrent(display, None, NULL);
     glXDestroyContext(display, context);

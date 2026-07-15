@@ -104,9 +104,12 @@ def capture_program(
         key=lambda path: path.stat().st_mtime_ns,
     )
     if not captures:
+        output_detail = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )[-2000:]
         raise RenderDocError(
             "The target exited without creating a new .rdc capture; ensure it presents a frame "
-            "or uses RenderDoc's in-application capture API"
+            f"or uses RenderDoc's in-application capture API. RenderDoc output: {output_detail}"
         )
     return {
         "target": str(target),
