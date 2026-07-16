@@ -15,14 +15,14 @@ from dcc_mcp_core.server_base import DccServerBase
 from .__version__ import __version__
 from .runtime import RenderDocError, get_version
 
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 0
 _server: Optional["RenderDocMcpServer"] = None
 
 
 class RenderDocMcpServer(DccServerBase):
     """Headless DCC-MCP adapter backed by renderdoccmd."""
 
-    def __init__(self, port: int = DEFAULT_PORT) -> None:
+    def __init__(self, port: Optional[int] = None) -> None:
         os.environ.setdefault("DCC_MCP_PYTHON_EXECUTABLE", sys.executable)
         options = DccServerOptions.from_env(
             "renderdoc",
@@ -43,12 +43,7 @@ class RenderDocMcpServer(DccServerBase):
 def start_server(port: Optional[int] = None) -> RenderDocMcpServer:
     global _server
     if _server is None or not _server.is_running:
-        selected_port = (
-            port
-            if port is not None
-            else int(os.environ.get("DCC_MCP_RENDERDOC_PORT", DEFAULT_PORT))
-        )
-        _server = RenderDocMcpServer(selected_port)
+        _server = RenderDocMcpServer(port)
         _server.register_builtin_actions()
         _server.start()
     return _server
