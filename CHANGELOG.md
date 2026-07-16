@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.2.1...v0.3.0) (2026-07-16)
+
+
+### Features
+
+* automate interactive frame capture ([3131ed3](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3131ed35a5f252993c7a099a05071e73313126c3))
+* default adapter instances to dynamic ports ([#6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/6)) ([b4bd77b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b4bd77bfc487755fc1aadc390997be638382ada1))
+
+
+### Bug Fixes
+
+* keep capture diagnostics cross-platform ([a477bfd](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a477bfd9f32d609f141d6d77d0576a861fd60bf1))
+* report capture target diagnostics ([861c852](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/861c8528b35a13fdd8441a89ede80f967e811839))
+
 ## [0.2.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.2.0...v0.2.1) (2026-07-15)
 
 
