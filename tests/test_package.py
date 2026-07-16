@@ -36,3 +36,30 @@ def test_runtime_version_matches_distribution_metadata():
     )
     assert locked_project is not None
     assert __version__ == locked_project.group(1)
+
+
+def test_start_server_defers_port_resolution_to_core(monkeypatch):
+    from types import SimpleNamespace
+
+    from dcc_mcp_renderdoc import server as server_module
+
+    ports = []
+    stub = SimpleNamespace(
+        is_running=False,
+        register_builtin_actions=lambda: None,
+        start=lambda: None,
+        stop=lambda: None,
+    )
+
+    monkeypatch.setattr(server_module, "_server", None)
+    monkeypatch.setattr(
+        server_module, "RenderDocMcpServer", lambda port=None: ports.append(port) or stub
+    )
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_PORT", "8765")
+
+    server_module.start_server(0)
+    server_module.stop_server()
+    server_module.start_server()
+    server_module.stop_server()
+
+    assert ports == [0, None]

@@ -21,6 +21,10 @@ dcc-mcp-renderdoc
 
 On Windows, set the variable to `renderdoccmd.exe`.
 
+Each adapter instance uses an OS-assigned MCP port and registers it for CLI discovery. Connect
+through the stable gateway at `http://127.0.0.1:9765/mcp`; set
+`DCC_MCP_RENDERDOC_PORT` only when a fixed direct endpoint is required.
+
 ## Agent workflows
 
 - Launch a game or test executable under RenderDoc and wait for a typed `.rdc` capture.

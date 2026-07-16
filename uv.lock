@@ -378,17 +378,17 @@ wheels = [
 
 [[package]]
 name = "dcc-mcp-core"
-version = "0.19.39"
+version = "0.19.45"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dcc-mcp-server" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/03/bc91ed7def4197b2a263f05211857156b7a6353b0be73cbfa26ec752c302/dcc_mcp_core-0.19.39.tar.gz", hash = "sha256:6e0e28565b899fd41572dd94602a4bc2b02ee7fca0eaf740cf352c37648734bd", size = 7664388, upload-time = "2026-07-14T20:12:42.481Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/81/bddc960f63141251bf6475e430257de6838ddaa0ae2fd06a1b97d65289b0/dcc_mcp_core-0.19.45.tar.gz", hash = "sha256:bc1602aa9097ec6349d77ae167b0ccbd94f2a2b810a6e9a0a3ba106e50e2a1f9", size = 7680152, upload-time = "2026-07-16T20:31:00.31Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e0/46/abd89d46964e23a2d301ff99df0509ae8879ecabbd37e47661f648d4a7dd/dcc_mcp_core-0.19.39-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:2646bd55cdda19eb71b95e1bebdd657910c3149a92b6fa1b57381e18a7ec31c4", size = 36253916, upload-time = "2026-07-14T20:12:29.603Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/68/b089e14242c4bb92ebe024d0f81642dc2992aacfd7220449db23868c643b/dcc_mcp_core-0.19.39-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:cb850a242659a928c746dfa3e63cc67c1f34a4f4096b0f7cefdb982157be4976", size = 19510509, upload-time = "2026-07-14T20:12:33.921Z" },
-    { url = "https://files.pythonhosted.org/packages/50/9b/c9db9b3fcc9c6c1cba076fb0fc7096a81a11cc18066a655e384657f5b0c5/dcc_mcp_core-0.19.39-cp38-abi3-win_amd64.whl", hash = "sha256:53b403faca0d967757c0f8a0168ae323a931f5fc3c5072eab9410e4420ffaac5", size = 19158326, upload-time = "2026-07-14T20:12:37.758Z" },
-    { url = "https://files.pythonhosted.org/packages/41/7d/ffddbdf871cff52acc6266edd0971f61cd713616279e62ccbdf150d150c9/dcc_mcp_core-0.19.39-py3-none-any.whl", hash = "sha256:d3742b3fa9cc6badb3723d16faffdb13b7edfd41cd43d1232153b248e6e61038", size = 459576, upload-time = "2026-07-14T20:12:40.46Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/1d/055f9ce9ec43d6e6802bbfb07fae166b63451f13114d9261ed9a3bdb98fb/dcc_mcp_core-0.19.45-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:7cd4f25e2156d9101320f1bc7a4de14c9050254a6b0ec7a20ec5b7b2b5dfb33c", size = 36325093, upload-time = "2026-07-16T20:30:51.247Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/15/bddb8d3a5aaafb2e3302ecac6c1a7529e2e01783093e7232c85f32812423/dcc_mcp_core-0.19.45-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8550100d6c52d57177f892e7dc938b811dfcb2256a6bf90edecd80e10396bf69", size = 19519756, upload-time = "2026-07-16T20:30:54.017Z" },
+    { url = "https://files.pythonhosted.org/packages/48/e9/27d22480db9836c2528f549e0a9acee3fafdc4c8969728983852221f27d5/dcc_mcp_core-0.19.45-cp38-abi3-win_amd64.whl", hash = "sha256:baed62e254df9b5a402858b22e0a51f87aebf4d957e4be0c9a487402f7d7c2ba", size = 19199805, upload-time = "2026-07-16T20:30:56.68Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/d9/a690032ba6cdfe098c475a6aa393ef44700761aa6b35844f2abbaadd9698/dcc_mcp_core-0.19.45-py3-none-any.whl", hash = "sha256:b70a1312a86e3265c0b3b85a6ecb83a7c89e72a3ebf43f09f0c4cf538eed6c82", size = 460364, upload-time = "2026-07-16T20:30:58.719Z" },
 ]
 
 [[package]]
@@ -412,7 +412,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
-    { name = "dcc-mcp-core", specifier = ">=0.19.38,<1.0.0" },
+    { name = "dcc-mcp-core", specifier = ">=0.19.45,<1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=6" },
@@ -421,12 +421,12 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "dcc-mcp-server"
-version = "0.19.39"
+version = "0.19.45"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/50/fed41765e0b7ca4afdedb053b0e05ab8750822a05106807f7f0a8c1c1934/dcc_mcp_server-0.19.39-py3-none-macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl", hash = "sha256:85bf40672e3ad852b878928877a833f3776ceb4384332af7a126ddbd482b07d7", size = 34747658, upload-time = "2026-07-14T20:11:20.445Z" },
-    { url = "https://files.pythonhosted.org/packages/50/51/74db75dd803a398246963f175b960f2a1151ae79a60e921618a8c61849b4/dcc_mcp_server-0.19.39-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:57d243ac0b7bf53d804674c566d55a6d71a6725d793c9ee021b6f78b2ad3c506", size = 17950327, upload-time = "2026-07-14T20:11:24.574Z" },
-    { url = "https://files.pythonhosted.org/packages/78/1e/16249a1593311ea53a078ba40bb2726c85d429f40c70351ae627af0d6424/dcc_mcp_server-0.19.39-py3-none-win_amd64.whl", hash = "sha256:d86de97d2a9c856a867e8797063a593ef79672a0cbf3c2771c04659547101df0", size = 16751550, upload-time = "2026-07-14T20:11:28.017Z" },
+    { url = "https://files.pythonhosted.org/packages/17/10/0a81c1abcda87eddb09c655ddfaf93dbfc6d70593bdeed36fe5903924286/dcc_mcp_server-0.19.45-py3-none-macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl", hash = "sha256:103169a2490906f029295e8fdaa5f350a45831cbcd207070566517c73b0ec338", size = 34790622, upload-time = "2026-07-16T20:23:24.283Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/02/f9ef7bbe8b5747372148b161f2860748a715d39e2f97c34efe0b609b0fe0/dcc_mcp_server-0.19.45-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ae3f6a033d3371d363616b0e9ab2fedfee25521fc82d3763fef775129c70f6d8", size = 18000038, upload-time = "2026-07-16T20:23:27.274Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/15/1012b6f2359e3b81929eda1a6e91fb98634d19152f6e2c6fa78baace5e80/dcc_mcp_server-0.19.45-py3-none-win_amd64.whl", hash = "sha256:610fffc1db136800fa0d23df674d721d16b42cb0b42cfb1d8aff3842b834f872", size = 16791002, upload-time = "2026-07-16T20:23:30.042Z" },
 ]
 
 [[package]]
