@@ -105,16 +105,14 @@ def test_capture_program_focuses_requested_child_before_trigger(tmp_path, monkey
         lambda arguments, **kwargs: CompletedProcess(arguments, 123, "Launched as ID 123", ""),
     )
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(runtime, "_wait_for_visible_process", lambda name, timeout: 77)
     monkeypatch.setattr(
         runtime,
-        "_trigger_capture_hotkey",
-        lambda pid: observed.setdefault("pid", pid) == 77,
-    )
-    monkeypatch.setattr(
-        runtime,
-        "_wait_for_captures",
-        lambda directory, before, timeout: [tmp_path / "capture_frame1.rdc"],
+        "_wait_for_triggered_capture",
+        lambda directory, before, name, ignored, timeout: (
+            observed.setdefault("pid", 77),
+            True,
+            [tmp_path / "capture_frame1.rdc"],
+        ),
     )
 
     result = runtime.capture_program(
@@ -137,9 +135,11 @@ def test_capture_program_failure_reports_missing_child_diagnostics(tmp_path, mon
         lambda arguments, **kwargs: CompletedProcess(arguments, 123, "Launched as ID 123", ""),
     )
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(runtime, "_wait_for_visible_process", lambda name, timeout: None)
-    monkeypatch.setattr(runtime, "_trigger_capture_hotkey", lambda pid: False)
-    monkeypatch.setattr(runtime, "_wait_for_captures", lambda directory, before, timeout: [])
+    monkeypatch.setattr(
+        runtime,
+        "_wait_for_triggered_capture",
+        lambda directory, before, name, ignored, timeout: (None, False, []),
+    )
     monkeypatch.setattr(
         runtime,
         "_visible_processes",
@@ -159,6 +159,81 @@ def test_capture_program_failure_reports_missing_child_diagnostics(tmp_path, mon
     assert "focused_target_window=False" in message
     assert "visible_processes=[launcher.exe(pid=12)]" in message
     assert "RenderDoc output: Launched as ID 123" in message
+
+
+def test_triggered_capture_retargets_replacement_process(tmp_path, monkeypatch):
+    capture = tmp_path / "capture_frame1.rdc"
+    process_snapshots = iter([[77], [77, 88]])
+    triggered = []
+    monkeypatch.setattr(
+        runtime,
+        "_visible_process_ids",
+        lambda _name: next(process_snapshots, [88]),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_trigger_capture_hotkey",
+        lambda process_id: not triggered.append(process_id),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_new_captures",
+        lambda _directory, _before: [capture] if triggered == [77, 88] else [],
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    target_pid, focused, captures = runtime._wait_for_triggered_capture(
+        tmp_path,
+        set(),
+        "game.exe",
+        set(),
+        1,
+    )
+
+    assert triggered == [77, 88]
+    assert target_pid == 88
+    assert focused is True
+    assert captures == [capture]
+
+
+def test_capture_program_injects_visible_unhooked_child(tmp_path, monkeypatch):
+    target = tmp_path / "launcher.exe"
+    target.touch()
+    capture = tmp_path / "capture_frame1.rdc"
+    observed = {}
+    monkeypatch.setattr(
+        runtime,
+        "_run",
+        lambda arguments, **kwargs: CompletedProcess(arguments, 123, "Launched as ID 123", ""),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        runtime,
+        "_wait_for_triggered_capture",
+        lambda directory, before, name, ignored, timeout: (88, True, []),
+    )
+
+    def fake_capture_process(process_id, output_template, **kwargs):
+        observed.update(process_id=process_id, output_template=output_template, **kwargs)
+        return {
+            "captures": [str(capture)],
+            "focused_target_window": True,
+            "stdout": "injected",
+        }
+
+    monkeypatch.setattr(runtime, "capture_process", fake_capture_process)
+
+    result = runtime.capture_program(
+        str(target),
+        str(tmp_path / "capture"),
+        hook_children=True,
+        trigger_after_secs=1,
+        trigger_process_name="game.exe",
+    )
+
+    assert observed["process_id"] == 88
+    assert observed["trigger_after_secs"] == 0.25
+    assert result["captures"] == [str(capture.resolve())]
 
 
 def test_capture_process_failure_reports_injection_diagnostics(tmp_path, monkeypatch):
