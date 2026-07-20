@@ -102,6 +102,10 @@ def capture_program(
         raise RenderDocError(f"Working directory does not exist: {cwd}")
 
     before = {path.resolve() for path in output.parent.glob("*.rdc")}
+    process_name = trigger_process_name or target.name
+    visible_before_launch = (
+        set(_visible_process_ids(process_name)) if trigger_after_secs is not None else set()
+    )
     cli_args = ["capture", "--working-dir", str(cwd), "--capture-file", str(output)]
     effective_wait_for_exit = wait_for_exit and trigger_after_secs is None
     if effective_wait_for_exit:
@@ -120,15 +124,38 @@ def capture_program(
     target_pid: Optional[int] = None
     if trigger_after_secs is not None:
         time.sleep(max(0.0, trigger_after_secs))
-        target_pid = _wait_for_visible_process(
-            trigger_process_name or target.name,
-            min(capture_wait_secs, 30),
+        target_pid, focused, captures = _wait_for_triggered_capture(
+            output.parent,
+            before,
+            process_name,
+            visible_before_launch,
+            capture_wait_secs,
         )
-        focused = _trigger_capture_hotkey(target_pid)
-        captures = _wait_for_captures(output.parent, before, capture_wait_secs)
     else:
         focused = False
         captures = _new_captures(output.parent, before)
+    injection_error: Optional[str] = None
+    if (
+        not captures
+        and target_pid is not None
+        and hook_children
+        and trigger_process_name is not None
+    ):
+        try:
+            fallback = capture_process(
+                target_pid,
+                output_template,
+                working_directory=str(cwd),
+                trigger_after_secs=0.25,
+                capture_wait_secs=capture_wait_secs,
+                api_validation=api_validation,
+                timeout_secs=min(timeout_secs, 60),
+                command=command,
+            )
+            captures = [Path(path).resolve() for path in fallback["captures"]]
+            focused = bool(fallback["focused_target_window"]) or focused
+        except RenderDocError as exc:
+            injection_error = str(exc)
     if not captures:
         output_detail = "\n".join(
             part.strip() for part in (result.stdout, result.stderr) if part.strip()
@@ -142,6 +169,7 @@ def capture_program(
             "No new .rdc capture appeared; ensure the target presents a frame and was hooked "
             f"before creating its graphics device. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
+            + (f". Injection fallback: {injection_error}" if injection_error else "")
         )
     return {
         "target": str(target),
@@ -246,32 +274,47 @@ def _trigger_capture_hotkey(process_id: Optional[int] = None) -> bool:
             return True
 
         user32.EnumWindows(find_window, 0)
-        if target:
-            user32.SetForegroundWindow(target)
-            time.sleep(0.15)
+        if not target:
+            return False
+        user32.SetForegroundWindow(target)
+        time.sleep(0.15)
     user32.keybd_event(0x7B, 0, 0, 0)
     user32.keybd_event(0x7B, 0, 2, 0)
     return bool(target)
 
 
-def _wait_for_visible_process(process_name: str, timeout_secs: int) -> Optional[int]:
-    if sys.platform != "win32":
-        return None
+def _wait_for_triggered_capture(
+    directory: Path,
+    before: set[Path],
+    process_name: str,
+    ignored_process_ids: set[int],
+    timeout_secs: int,
+) -> tuple[Optional[int], bool, list[Path]]:
     deadline = time.monotonic() + timeout_secs
+    handled_process_ids = set(ignored_process_ids)
+    target_pid: Optional[int] = None
+    focused = False
     while time.monotonic() < deadline:
-        process_id = _visible_process_id(process_name)
-        if process_id is not None:
-            return process_id
+        captures = _new_captures(directory, before)
+        if captures:
+            return target_pid, focused, captures
+        for process_id in _visible_process_ids(process_name):
+            if process_id in handled_process_ids:
+                continue
+            handled_process_ids.add(process_id)
+            target_pid = process_id
+            focused = _trigger_capture_hotkey(process_id) or focused
         time.sleep(0.25)
-    return None
+    return target_pid, focused, _new_captures(directory, before)
 
 
-def _visible_process_id(process_name: str) -> Optional[int]:
+def _visible_process_ids(process_name: str) -> list[int]:
     expected = Path(process_name).name.casefold()
-    for process in _visible_processes():
-        if process["name"].casefold() == expected:
-            return int(process["process_id"])
-    return None
+    return [
+        int(process["process_id"])
+        for process in _visible_processes()
+        if process["name"].casefold() == expected
+    ]
 
 
 def _visible_processes(limit: int = 64) -> list[dict[str, Any]]:
