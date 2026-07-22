@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.3](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.2...v0.3.3) (2026-07-22)
+
+
+### Bug Fixes
+
+* accept POSIX target ident exit status ([e35d14e](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e35d14ed7dfdd429f5356ac8a5d5a98411a9dc28))
+* harden target control lifecycle ([1a1eca8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1a1eca82fb453ec40b11a33791160d6074e70a6f))
+* isolate target control sidecar ([2e16b2b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/2e16b2b009c76136a5ad2889c4943c458401923a))
+* normalize target names across platforms ([44602a0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/44602a0fca3fd2749688f56f169280d18ddcb989))
+* trigger captures through RenderDoc Target Control ([68d93aa](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/68d93aa9c0629b61cac75275ca53a55a65f29729))
+* trigger captures through target control ([f0a11c8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/f0a11c844a5597c0ae6b022a8ec07c32d7a15806))
+* verify target before capture trigger ([a392e9f](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a392e9fc974152d5d2dc183c1ed8b60ed15c2195))
+
 ## [0.3.2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.1...v0.3.2) (2026-07-22)
 
 
