@@ -44,6 +44,12 @@ class _CaptureController:
             reader.join(timeout=1)
 
 
+def _is_launched_id_returncode(returncode: Optional[int], launched_id: int) -> bool:
+    if returncode is None or returncode in (0, launched_id):
+        return True
+    return sys.platform != "win32" and returncode == launched_id % 256
+
+
 def _start_capture_controller(
     arguments: Sequence[str], *, timeout_secs: int, command: Optional[str]
 ) -> _CaptureController:
@@ -75,12 +81,15 @@ def _start_capture_controller(
     controller = _CaptureController(process, stdout, stderr, readers)
     deadline = time.monotonic() + timeout_secs
     while True:
+        returncode = process.poll()
+        if returncode is not None:
+            for reader in readers:
+                reader.join(timeout=1)
         combined = "".join(stdout + stderr)
         launched = re.search(r"Launched as ID (\d+)", combined)
-        returncode = process.poll()
         if launched is not None:
             launched_id = int(launched.group(1))
-            if returncode is None or returncode in (0, launched_id):
+            if _is_launched_id_returncode(returncode, launched_id):
                 controller.launched_id = launched_id
                 return controller
         if returncode is not None:
@@ -291,7 +300,7 @@ def _run(
         if not (
             accept_launched_id
             and launched is not None
-            and int(launched.group(1)) == result.returncode
+            and _is_launched_id_returncode(result.returncode, int(launched.group(1)))
         ):
             raise RenderDocError(f"RenderDoc exited with code {result.returncode}: {detail}")
     return result

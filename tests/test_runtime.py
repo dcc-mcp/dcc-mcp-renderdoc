@@ -97,6 +97,26 @@ def test_non_waiting_launch_accepts_renderdoc_target_id(monkeypatch, tmp_path):
     assert result.returncode == 12345
 
 
+def test_non_waiting_launch_accepts_posix_truncated_target_id(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd"
+    command.touch()
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(args[0], 8, "Launched as ID 38920", ""),
+    )
+
+    result = runtime._run(
+        ["capture", "game"],
+        timeout_secs=10,
+        command=str(command),
+        accept_launched_id=True,
+    )
+
+    assert result.returncode == 8
+
+
 def test_capture_controller_exposes_launched_target_ident(monkeypatch, tmp_path):
     command = tmp_path / "renderdoccmd.exe"
     command.touch()
@@ -125,6 +145,32 @@ def test_capture_controller_exposes_launched_target_ident(monkeypatch, tmp_path)
         assert controller.launched_id == 4321
     finally:
         controller.close()
+
+
+def test_capture_controller_accepts_posix_truncated_id_after_draining_output(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd"
+    command.touch()
+
+    class Process:
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = io.StringIO("Launched as ID 38920\n")
+            self.stderr = io.StringIO("")
+            self.returncode = 8
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+    monkeypatch.setattr(runtime.subprocess, "Popen", Process)
+
+    controller = runtime._start_capture_controller(
+        ["capture", "game"], timeout_secs=1, command=str(command)
+    )
+
+    assert controller.launched_id == 38920
 
 
 def test_target_control_trigger_uses_bundled_qrenderdoc_status(monkeypatch, tmp_path):
