@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ class _CaptureController:
         self.stdout = stdout
         self.stderr = stderr
         self.readers = readers
+        self.launched_id: Optional[int] = None
 
     def output(self) -> tuple[str, str]:
         return "".join(self.stdout), "".join(self.stderr)
@@ -79,6 +81,7 @@ def _start_capture_controller(
         if launched is not None:
             launched_id = int(launched.group(1))
             if returncode is None or returncode in (0, launched_id):
+                controller.launched_id = launched_id
                 return controller
         if returncode is not None:
             controller.close()
@@ -111,6 +114,128 @@ def resolve_renderdoccmd(explicit: Optional[str] = None) -> Path:
     raise RenderDocError(
         "renderdoccmd was not found; install RenderDoc or set DCC_MCP_RENDERDOC_CMD"
     )
+
+
+def _resolve_qrenderdoc(command: Optional[str]) -> Path:
+    renderdoccmd = resolve_renderdoccmd(command)
+    name = "qrenderdoc.exe" if renderdoccmd.suffix.casefold() == ".exe" else "qrenderdoc"
+    qrenderdoc = renderdoccmd.with_name(name)
+    if not qrenderdoc.is_file():
+        raise RenderDocError(
+            "qrenderdoc was not found beside renderdoccmd; required for Target Control: "
+            f"{qrenderdoc}"
+        )
+    return qrenderdoc
+
+
+def _validate_target_control_status(status: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "connected",
+        "triggered",
+        "shutdown",
+        "timed_out",
+        "target_pid",
+        "capture_path",
+        "error",
+    }
+    if not isinstance(status, dict) or set(status) != fields:
+        raise RenderDocError("Target Control returned an invalid status schema")
+    if status["schema_version"] != 1:
+        raise RenderDocError("Target Control returned an unsupported status version")
+    boolean_fields = ("connected", "triggered", "shutdown", "timed_out")
+    if any(type(status[name]) is not bool for name in boolean_fields):
+        raise RenderDocError("Target Control returned invalid boolean status fields")
+    if status["target_pid"] is not None and (
+        type(status["target_pid"]) is not int or status["target_pid"] <= 0
+    ):
+        raise RenderDocError("Target Control returned an invalid target PID")
+    if status["capture_path"] is not None and (
+        not isinstance(status["capture_path"], str) or not status["capture_path"]
+    ):
+        raise RenderDocError("Target Control returned an invalid capture path")
+    if status["error"] is not None and not isinstance(status["error"], str):
+        raise RenderDocError("Target Control returned an invalid error field")
+    if (
+        status["error"]
+        or not status["connected"]
+        or not status["triggered"]
+        or not status["shutdown"]
+        or status["timed_out"]
+    ):
+        raise RenderDocError(f"Target Control failed: {status['error'] or 'incomplete status'}")
+    if type(status["target_pid"]) is not int:
+        raise RenderDocError("Target Control success did not include a target PID")
+    if not isinstance(status["capture_path"], str) or not status["capture_path"]:
+        raise RenderDocError("Target Control success did not include a capture path")
+    return status
+
+
+def _trigger_target_capture(
+    ident: int,
+    *,
+    capture_wait_secs: int,
+    command: Optional[str],
+    target_name: Optional[str] = None,
+) -> dict[str, Any]:
+    if type(ident) is not int or ident <= 0:
+        raise RenderDocError("RenderDoc target ident must be a positive integer")
+    if type(capture_wait_secs) is not int or capture_wait_secs <= 0:
+        raise RenderDocError("Target Control timeout must be a positive integer")
+    if target_name is not None and (not isinstance(target_name, str) or not target_name.strip()):
+        raise RenderDocError("Target Control target name must be a non-empty string")
+    qrenderdoc = _resolve_qrenderdoc(command)
+    script_path = Path(__file__).with_name("_target_control.py")
+    if not script_path.is_file():
+        raise RenderDocError(f"Bundled Target Control helper is missing: {script_path}")
+    with tempfile.TemporaryDirectory(prefix="dcc-mcp-renderdoc-target-") as directory:
+        root = Path(directory)
+        status_path = root / "status.json"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "DCC_MCP_RENDERDOC_TARGET_IDENT": str(ident),
+                "DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS": str(capture_wait_secs),
+                "DCC_MCP_RENDERDOC_TARGET_STATUS": str(status_path),
+            }
+        )
+        if target_name is not None:
+            environment["DCC_MCP_RENDERDOC_TARGET_NAME"] = target_name
+        else:
+            environment.pop("DCC_MCP_RENDERDOC_TARGET_NAME", None)
+        try:
+            result = subprocess.run(
+                [str(qrenderdoc), "--python", str(script_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=capture_wait_secs + 30,
+                shell=False,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RenderDocError(
+                f"Target Control host timed out after {capture_wait_secs + 30}s"
+            ) from exc
+        if not status_path.is_file():
+            detail = (result.stderr or result.stdout or "no status output").strip()[-2000:]
+            raise RenderDocError(f"Target Control did not write status: {detail}")
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RenderDocError("Target Control wrote malformed status JSON") from exc
+        return _validate_target_control_status(status)
+
+
+def _capture_from_target_status(
+    status: dict[str, Any], directory: Path, before: set[Path]
+) -> list[Path]:
+    capture = Path(status["capture_path"]).expanduser().resolve()
+    if capture.parent != directory.resolve() or capture.suffix.casefold() != ".rdc":
+        raise RenderDocError("Target Control returned a capture outside the requested RDC output")
+    if not capture.is_file() or capture in before:
+        raise RenderDocError("Target Control capture is missing or was not created by this request")
+    return [capture]
 
 
 def _run(
@@ -178,10 +303,6 @@ def capture_program(
         raise RenderDocError(f"Working directory does not exist: {cwd}")
 
     before = {path.resolve() for path in output.parent.glob("*.rdc")}
-    process_name = trigger_process_name or target.name
-    visible_before_launch = (
-        set(_visible_process_ids(process_name)) if trigger_after_secs is not None else set()
-    )
     cli_args = ["capture", "--working-dir", str(cwd), "--capture-file", str(output)]
     effective_wait_for_exit = wait_for_exit and trigger_after_secs is None
     if effective_wait_for_exit:
@@ -192,6 +313,7 @@ def capture_program(
         cli_args.append("--opt-hook-children")
     cli_args.extend([str(target), *(str(value) for value in arguments or [])])
     target_pid: Optional[int] = None
+    trigger_mode = "renderdoccmd"
     if trigger_after_secs is not None:
         controller = _start_capture_controller(
             cli_args,
@@ -200,13 +322,15 @@ def capture_program(
         )
         try:
             time.sleep(max(0.0, trigger_after_secs))
-            target_pid, focused, captures = _wait_for_triggered_capture(
-                output.parent,
-                before,
-                process_name,
-                visible_before_launch,
-                capture_wait_secs,
+            status = _trigger_target_capture(
+                controller.launched_id,
+                capture_wait_secs=capture_wait_secs,
+                command=command,
+                target_name=trigger_process_name,
             )
+            target_pid = status["target_pid"]
+            captures = _capture_from_target_status(status, output.parent, before)
+            trigger_mode = "target_control"
         finally:
             controller.close()
         stdout, stderr = controller.output()
@@ -218,47 +342,24 @@ def capture_program(
             accept_launched_id=not effective_wait_for_exit,
         )
         stdout, stderr = result.stdout, result.stderr
-        focused = False
         captures = _new_captures(output.parent, before)
-    injection_error: Optional[str] = None
-    if (
-        not captures
-        and target_pid is not None
-        and hook_children
-        and trigger_process_name is not None
-    ):
-        try:
-            fallback = capture_process(
-                target_pid,
-                output_template,
-                working_directory=str(cwd),
-                trigger_after_secs=0.25,
-                capture_wait_secs=capture_wait_secs,
-                api_validation=api_validation,
-                timeout_secs=min(timeout_secs, 60),
-                command=command,
-            )
-            captures = [Path(path).resolve() for path in fallback["captures"]]
-            focused = bool(fallback["focused_target_window"]) or focused
-        except RenderDocError as exc:
-            injection_error = str(exc)
     if not captures:
         output_detail = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())[-2000:]
         diagnostics = _capture_failure_diagnostics(
             process_id=target_pid,
             process_name=trigger_process_name or target.name,
-            focused=focused,
+            focused=False,
         )
         raise RenderDocError(
             "No new .rdc capture appeared; ensure the target presents a frame and was hooked "
             f"before creating its graphics device. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
-            + (f". Injection fallback: {injection_error}" if injection_error else "")
         )
     return {
         "target": str(target),
         "captures": [str(path) for path in captures],
-        "focused_target_window": focused,
+        "focused_target_window": False,
+        "trigger_mode": trigger_mode,
         "stdout": stdout.strip(),
     }
 
@@ -274,7 +375,7 @@ def capture_process(
     timeout_secs: int = 60,
     command: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Inject into one live process, trigger F12, and return the new capture."""
+    """Inject into one live process, trigger through Target Control, and return the capture."""
     if process_id <= 0:
         raise RenderDocError("Process ID must be a positive integer")
     output = Path(output_template).expanduser().resolve()
@@ -295,8 +396,17 @@ def capture_process(
     )
     try:
         time.sleep(max(0.0, trigger_after_secs))
-        focused = _trigger_capture_hotkey(process_id)
-        captures = _wait_for_captures(output.parent, before, capture_wait_secs)
+        status = _trigger_target_capture(
+            controller.launched_id,
+            capture_wait_secs=capture_wait_secs,
+            command=command,
+        )
+        if status["target_pid"] != process_id:
+            raise RenderDocError(
+                "Target Control connected to an unexpected process: "
+                f"expected PID {process_id}, got {status['target_pid']}"
+            )
+        captures = _capture_from_target_status(status, output.parent, before)
     finally:
         controller.close()
     stdout, stderr = controller.output()
@@ -305,18 +415,20 @@ def capture_process(
         diagnostics = _capture_failure_diagnostics(
             process_id=process_id,
             process_name=None,
-            focused=focused,
+            focused=False,
         )
         raise RenderDocError(
-            "No .rdc capture appeared after injection and F12. Inject before the target creates "
-            "its graphics device; for an already initialized game, relaunch it with "
+            "No .rdc capture appeared after injection and Target Control trigger. Inject before "
+            "the target creates its graphics device; for an already initialized game, relaunch "
+            "it with "
             f"capture_program. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
         )
     return {
         "process_id": process_id,
         "captures": [str(path) for path in captures],
-        "focused_target_window": focused,
+        "focused_target_window": False,
+        "trigger_mode": "target_control",
         "stdout": stdout.strip(),
     }
 
@@ -326,81 +438,6 @@ def _new_captures(directory: Path, before: set[Path]) -> list[Path]:
         (path.resolve() for path in directory.glob("*.rdc") if path.resolve() not in before),
         key=lambda path: path.stat().st_mtime_ns,
     )
-
-
-def _wait_for_captures(directory: Path, before: set[Path], timeout_secs: int) -> list[Path]:
-    deadline = time.monotonic() + timeout_secs
-    while time.monotonic() < deadline:
-        captures = _new_captures(directory, before)
-        if captures:
-            return captures
-        time.sleep(0.25)
-    return []
-
-
-def _trigger_capture_hotkey(process_id: Optional[int] = None) -> bool:
-    if sys.platform != "win32":
-        raise RenderDocError("Automatic F12 capture triggering is currently supported on Windows")
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    target = wintypes.HWND()
-    if process_id is not None:
-        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-        @callback_type
-        def find_window(window, _extra):
-            nonlocal target
-            owner = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
-            if owner.value == process_id and user32.IsWindowVisible(window):
-                target = window
-                return False
-            return True
-
-        user32.EnumWindows(find_window, 0)
-        if not target:
-            return False
-        user32.SetForegroundWindow(target)
-        time.sleep(0.15)
-    user32.keybd_event(0x7B, 0, 0, 0)
-    user32.keybd_event(0x7B, 0, 2, 0)
-    return bool(target)
-
-
-def _wait_for_triggered_capture(
-    directory: Path,
-    before: set[Path],
-    process_name: str,
-    ignored_process_ids: set[int],
-    timeout_secs: int,
-) -> tuple[Optional[int], bool, list[Path]]:
-    deadline = time.monotonic() + timeout_secs
-    handled_process_ids = set(ignored_process_ids)
-    target_pid: Optional[int] = None
-    focused = False
-    while time.monotonic() < deadline:
-        captures = _new_captures(directory, before)
-        if captures:
-            return target_pid, focused, captures
-        for process_id in _visible_process_ids(process_name):
-            if process_id in handled_process_ids:
-                continue
-            handled_process_ids.add(process_id)
-            target_pid = process_id
-            focused = _trigger_capture_hotkey(process_id) or focused
-        time.sleep(0.25)
-    return target_pid, focused, _new_captures(directory, before)
-
-
-def _visible_process_ids(process_name: str) -> list[int]:
-    expected = Path(process_name).name.casefold()
-    return [
-        int(process["process_id"])
-        for process in _visible_processes()
-        if process["name"].casefold() == expected
-    ]
 
 
 def _visible_processes(limit: int = 64) -> list[dict[str, Any]]:

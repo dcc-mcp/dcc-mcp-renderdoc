@@ -21,12 +21,15 @@ metadata:
 # RenderDoc Capture
 
 Call `get_version` before capture. `capture_program` starts only the explicit executable and
-arguments, never a shell. Set `trigger_after_secs` to trigger F12 automatically on Windows.
-When using `hook_children`, set `trigger_process_name` to the child executable that should receive
-focus before F12.
+arguments, never a shell. Set `trigger_after_secs` to request one capture through RenderDoc's
+official local Target Control API. This headless trigger requires `qrenderdoc` beside
+`renderdoccmd`; it does not focus a window or synthesize keyboard input. `hook_children` remains a
+RenderDoc launch option. Set `trigger_process_name` when a named child target should be selected;
+the sidecar enumerates local Target Control idents and fails safely if none or more than one match.
 
 Use `capture_process` when Steam or another platform client must launch the target first. It
-injects into the explicit PID, focuses that visible window, triggers F12 after the requested delay,
-and waits for the resulting capture. Inject before the target creates its graphics device; late
-injection cannot recover resources that RenderDoc did not observe. Prefer `capture_program` when
-the executable can be launched directly. Neither tool terminates the target process.
+injects into the explicit PID, connects to the returned Target Control ident, requests one capture
+after the configured delay, and waits for the resulting file. It never takes foreground focus or
+emits a hotkey. Inject before the target creates its graphics device; late injection cannot recover
+resources that RenderDoc did not observe. Prefer `capture_program` when the executable can be
+launched directly. Neither tool terminates the target process.

@@ -16,6 +16,7 @@ def test_server_constructs_with_headless_contract():
 
 def test_bundled_skills_and_release_workflow_exist():
     root = Path(__file__).parents[1]
+    assert (root / "src" / "dcc_mcp_renderdoc" / "_target_control.py").is_file()
     skills = root / "src" / "dcc_mcp_renderdoc" / "skills"
     assert {path.name for path in skills.iterdir() if path.is_dir()} == {
         "renderdoc-analysis",
