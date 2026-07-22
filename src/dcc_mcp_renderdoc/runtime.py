@@ -213,6 +213,7 @@ def _trigger_target_capture(
     command: Optional[str],
     target_name: Optional[str] = None,
     trigger_after_secs: float = 0.0,
+    expected_pid: Optional[int] = None,
 ) -> dict[str, Any]:
     if type(ident) is not int or ident <= 0:
         raise RenderDocError("RenderDoc target ident must be a positive integer")
@@ -220,6 +221,8 @@ def _trigger_target_capture(
         raise RenderDocError("Target Control timeout must be a positive integer")
     if target_name is not None and (not isinstance(target_name, str) or not target_name.strip()):
         raise RenderDocError("Target Control target name must be a non-empty string")
+    if expected_pid is not None and (type(expected_pid) is not int or expected_pid <= 0):
+        raise RenderDocError("Target Control expected PID must be a positive integer")
     if (
         isinstance(trigger_after_secs, bool)
         or not isinstance(trigger_after_secs, (int, float))
@@ -260,6 +263,10 @@ def _trigger_target_capture(
             environment["DCC_MCP_RENDERDOC_TARGET_NAME"] = target_name
         else:
             environment.pop("DCC_MCP_RENDERDOC_TARGET_NAME", None)
+        if expected_pid is not None:
+            environment["DCC_MCP_RENDERDOC_EXPECTED_PID"] = str(expected_pid)
+        else:
+            environment.pop("DCC_MCP_RENDERDOC_EXPECTED_PID", None)
         _configure_qrenderdoc_environment(root, environment)
         stdout_path = root / "qrenderdoc.stdout.log"
         stderr_path = root / "qrenderdoc.stderr.log"
@@ -282,6 +289,7 @@ def _trigger_target_capture(
             diagnostics = {
                 "target_ident": ident,
                 "target_name": target_name,
+                "expected_pid": expected_pid,
                 "capture_wait_secs": capture_wait_secs,
                 "trigger_after_secs": trigger_after_secs,
                 "qt_qpa_platform": environment.get("QT_QPA_PLATFORM"),
@@ -355,13 +363,25 @@ def _run(
     except OSError as exc:
         raise RenderDocError(f"Could not start RenderDoc: {exc}") from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
-        launched = re.search(r"Launched as ID (\d+)", detail)
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        launched = re.search(r"Launched as ID (\d+)", stdout + "\n" + stderr)
         if not (
             accept_launched_id
             and launched is not None
             and _is_launched_id_returncode(result.returncode, int(launched.group(1)))
         ):
+            detail = (
+                "\n".join(
+                    part
+                    for part in (
+                        f"stdout: {stdout.strip()[-1000:]}" if stdout.strip() else "",
+                        f"stderr: {stderr.strip()[-1000:]}" if stderr.strip() else "",
+                    )
+                    if part
+                )
+                or "unknown error"
+            )
             raise RenderDocError(f"RenderDoc exited with code {result.returncode}: {detail}")
     return result
 
@@ -497,6 +517,7 @@ def capture_process(
             capture_wait_secs=capture_wait_secs,
             command=command,
             trigger_after_secs=trigger_after_secs,
+            expected_pid=process_id,
         )
         if status["target_pid"] != process_id:
             raise RenderDocError(

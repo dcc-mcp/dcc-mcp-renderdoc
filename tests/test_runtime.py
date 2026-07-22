@@ -117,6 +117,28 @@ def test_non_waiting_launch_accepts_posix_truncated_target_id(monkeypatch, tmp_p
     assert result.returncode == 8
 
 
+def test_non_waiting_launch_finds_target_id_across_split_streams(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd"
+    command.touch()
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(
+            args[0], 8, "Launched as ID 38920", "unrelated warning"
+        ),
+    )
+
+    result = runtime._run(
+        ["capture", "game"],
+        timeout_secs=10,
+        command=str(command),
+        accept_launched_id=True,
+    )
+
+    assert result.returncode == 8
+
+
 def test_capture_controller_exposes_launched_target_ident(monkeypatch, tmp_path):
     command = tmp_path / "renderdoccmd.exe"
     command.touch()
@@ -778,6 +800,56 @@ def test_bundled_target_control_pumps_messages_through_long_trigger_delay(monkey
     assert status["error"] is None
 
 
+def test_bundled_target_control_rejects_expected_pid_before_trigger(monkeypatch, tmp_path):
+    status_path = tmp_path / "status.json"
+    calls = []
+
+    class Target:
+        def Connected(self):
+            return True
+
+        def GetPID(self):
+            return 99
+
+        def TriggerCapture(self, frames):
+            calls.append(("trigger", frames))
+
+        def ReceiveMessage(self, _progress):
+            calls.append(("receive",))
+            return SimpleNamespace(type="noop")
+
+        def Shutdown(self):
+            calls.append(("shutdown",))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "renderdoc",
+        SimpleNamespace(
+            CreateTargetControl=lambda *_args: Target(),
+            TargetControlMessageType=SimpleNamespace(
+                NewCapture="new-capture", Disconnected="disconnected"
+            ),
+        ),
+    )
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_IDENT", "4321")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS", "30")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS", "612")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_EXPECTED_PID", "42")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_STATUS", str(status_path))
+    monkeypatch.delenv("DCC_MCP_RENDERDOC_TARGET_NAME", raising=False)
+
+    with pytest.raises(SystemExit):
+        runpy.run_path(
+            str(Path(runtime.__file__).with_name("_target_control.py")),
+            run_name="__main__",
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["target_pid"] == 99
+    assert "did not match expected PID 42" in status["error"]
+    assert calls == [("shutdown",)]
+
+
 @pytest.mark.parametrize("actual_target", ["C:\\\\games\\\\child", "/games/child"])
 def test_bundled_target_control_follows_new_child_from_launched_parent(
     monkeypatch, tmp_path, actual_target
@@ -1410,7 +1482,12 @@ def test_capture_process_reuses_target_control_trigger(tmp_path, monkeypatch):
 
     assert observed == {
         "ident": 91,
-        "kwargs": {"capture_wait_secs": 7, "command": None, "trigger_after_secs": 0},
+        "kwargs": {
+            "capture_wait_secs": 7,
+            "command": None,
+            "trigger_after_secs": 0,
+            "expected_pid": 42,
+        },
     }
     assert result["captures"] == [str(capture.resolve())]
     assert result["focused_target_window"] is False

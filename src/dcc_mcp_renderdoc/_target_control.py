@@ -125,6 +125,10 @@ def main():
         capture_wait_secs = _positive_int("DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS")
         trigger_after_secs = _nonnegative_float("DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS")
         target_name = os.environ.get("DCC_MCP_RENDERDOC_TARGET_NAME", "").strip()
+        expected_pid_value = os.environ.get("DCC_MCP_RENDERDOC_EXPECTED_PID", "").strip()
+        expected_pid = int(expected_pid_value) if expected_pid_value else None
+        if expected_pid is not None and expected_pid <= 0:
+            raise ValueError("DCC_MCP_RENDERDOC_EXPECTED_PID must be positive")
         trigger_at = time.monotonic() + trigger_after_secs
         capture_deadline = trigger_at + capture_wait_secs
         target = _open_target(rd, ident)
@@ -138,6 +142,12 @@ def main():
             target = child
         status["connected"] = True
         status["target_pid"] = int(target.GetPID())
+        if expected_pid is not None and status["target_pid"] != expected_pid:
+            raise RuntimeError(
+                "RenderDoc target PID {} did not match expected PID {}".format(
+                    status["target_pid"], expected_pid
+                )
+            )
         _pump_until(rd, target, trigger_at)
         target.TriggerCapture(1)
         status["triggered"] = True
