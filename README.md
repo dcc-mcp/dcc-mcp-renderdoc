@@ -50,8 +50,8 @@ attach a stable session id with `--meta-json`, query `dcc-mcp-cli stats --range 
 RenderDoc capture and replay automation for the DCC Model Context Protocol ecosystem.
 
 The adapter is headless-first: it reuses the official `renderdoccmd` executable for capture and
-conversion, so agents can automate graphics regression triage without keeping the RenderDoc GUI
-open or installing a second bridge.
+conversion. Delayed capture uses RenderDoc's official Target Control API through the sibling
+`qrenderdoc` bundled Python runtime, without foreground focus or synthetic keyboard input.
 
 ## Install
 
@@ -75,8 +75,8 @@ through the stable gateway at `http://127.0.0.1:9765/mcp`; set
 ## Agent workflows
 
 - Launch a game or test executable under RenderDoc and wait for a typed `.rdc` capture.
-- Trigger F12 automatically after a configurable delay, with optional child-process window focus.
-- Inject into a visible Windows process that had to be launched by a platform client, then trigger and collect a capture.
+- Trigger a capture through official Target Control after a configurable delay.
+- Inject into a process that had to be launched by a platform client, then trigger and collect a capture.
 - Inspect capture driver, machine identity, chunk version, API-call counts, and representative calls.
 - Export a capture thumbnail for visual review.
 - Export Chrome trace JSON for timeline tooling.
@@ -84,16 +84,27 @@ through the stable gateway at `http://127.0.0.1:9765/mcp`; set
 The capture tool launches only the explicit executable and arguments supplied by the caller. It
 never invokes a shell. Analysis tools are read-only with respect to the `.rdc` input.
 
-For interactive Windows programs, pass `trigger_after_secs` to `capture_program`. When a launcher
-creates the rendered child process, also pass `trigger_process_name`. Use `capture_process` only
-when the target is already running; late injection may not capture graphics devices created before
-RenderDoc was attached.
+Pass `trigger_after_secs` to `capture_program` for a Target Control trigger. This requires
+`qrenderdoc` beside `renderdoccmd`. The official RenderDoc runtime supports Windows and Linux;
+macOS is covered only by this project's Python unit tests. Linux Target Control requires an X or
+Wayland display, so headless hosts must run under Xvfb (or explicitly configure a working Qt
+platform). The official Linux archive does not bundle Qt's `offscreen` platform plugin. Each
+sidecar uses an isolated Qt data profile with RenderDoc analytics explicitly opted out, preventing
+the first-run consent dialog without reading or changing the user's qrenderdoc configuration.
+
+When a launcher creates the rendered child process, set `hook_children=true` and pass
+`trigger_process_name`. The adapter first checks the launched target itself; if its name does not
+match, it follows only that target's official `NewChild` messages to find a unique named child. A
+child name without child hooking fails before launch. Use `capture_process` only when the target is
+already running; late injection may not capture graphics devices created before RenderDoc was
+attached.
 
 ## Real CI
 
-CI discovers the current stable RenderDoc build from the official downloads page. It compiles a
-small OpenGL program, captures a real frame under Xvfb, calls the MCP analysis tool against the
-resulting `.rdc`, and verifies thumbnail and timeline exports.
+CI discovers the current stable Linux RenderDoc build from the official downloads page. It
+compiles a small OpenGL program, requests a real frame through Target Control under Xvfb using
+Qt's bundled `xcb` platform, asserts the structured trigger mode, calls the MCP analysis tool
+against the resulting `.rdc`, and verifies thumbnail and timeline exports.
 
 ## Development
 

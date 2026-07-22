@@ -52,20 +52,21 @@ int main(int argc, char **argv) {
     glXSwapBuffers(display, window);
     glFinish();
 
-    api->StartFrameCapture(NULL, NULL);
-    if (!api->IsFrameCapturing()) return 4;
-    glViewport(0, 0, 320, 200);
-    glClearColor(0.1f, 0.4f, 0.8f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glXSwapBuffers(display, window);
-    glFinish();
-    if (!api->EndFrameCapture(NULL, NULL)) return 5;
-    usleep(200000);
+    for (int frame = 0; frame < 300; frame++) {
+        float pulse = (float)(frame % 60) / 60.0f;
+        glClearColor(0.1f, 0.3f + pulse * 0.2f, 0.8f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glXSwapBuffers(display, window);
+        glFinish();
+        usleep(16000);
+    }
 
     glXMakeCurrent(display, None, NULL);
     glXDestroyContext(display, context);
     XDestroyWindow(display, window);
     XCloseDisplay(display);
-    printf("captured=%u\n", api->GetNumCaptures());
+    unsigned int captures = api->GetNumCaptures();
+    printf("captured=%u\n", captures);
+    if (captures != 1) return 4;
     return 0;
 }

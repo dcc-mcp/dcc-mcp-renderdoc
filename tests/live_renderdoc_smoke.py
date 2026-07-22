@@ -76,6 +76,16 @@ def _tool(url: str, suffix: str) -> str:
     return matches[0]
 
 
+def _contains_target_control_trigger(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("trigger_mode") == "target_control":
+            return True
+        return any(_contains_target_control_trigger(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_target_control_trigger(item) for item in value)
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--renderdoc", required=True)
@@ -104,13 +114,17 @@ def main() -> None:
                 "output_template": str(artifacts / "smoke"),
                 "arguments": [str(artifacts / "smoke")],
                 "working_directory": str(Path(program).parent),
+                "trigger_after_secs": 0.2,
+                "capture_wait_secs": 60,
             },
         )
-        _wait(url, capture_job)
+        capture_result = _wait(url, capture_job)
+        if not _contains_target_control_trigger(capture_result):
+            raise RuntimeError("MCP capture did not report trigger_mode=target_control")
         captures = sorted(artifacts.glob("*.rdc"))
-        if not captures:
-            raise RuntimeError("MCP capture tool did not create an .rdc file")
-        capture = str(captures[-1])
+        if len(captures) != 1:
+            raise RuntimeError(f"Expected exactly one Target Control capture, found {captures}")
+        capture = str(captures[0])
         inspection = _wait(
             url,
             _call(url, _tool(url, "inspect_capture"), {"capture_file": capture}),

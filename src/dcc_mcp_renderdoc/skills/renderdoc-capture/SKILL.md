@@ -21,12 +21,20 @@ metadata:
 # RenderDoc Capture
 
 Call `get_version` before capture. `capture_program` starts only the explicit executable and
-arguments, never a shell. Set `trigger_after_secs` to trigger F12 automatically on Windows.
-When using `hook_children`, set `trigger_process_name` to the child executable that should receive
-focus before F12.
+arguments, never a shell. Set `trigger_after_secs` to request one capture through RenderDoc's
+official local Target Control API. This headless trigger requires `qrenderdoc` beside
+`renderdoccmd`; it does not focus a window or synthesize keyboard input. `hook_children` remains a
+RenderDoc launch option. Set `trigger_process_name` only with `hook_children=true`; the sidecar
+checks the launched target first and, if its name differs, follows only its official `NewChild`
+messages to find a unique matching child. A child name without child hooking fails before launch.
+
+The official RenderDoc runtime supports Windows and Linux, not macOS (where this project runs
+Python unit tests only). On headless Linux, run the adapter under Xvfb or provide another working
+X/Wayland display; the official archive does not include Qt's `offscreen` platform plugin.
 
 Use `capture_process` when Steam or another platform client must launch the target first. It
-injects into the explicit PID, focuses that visible window, triggers F12 after the requested delay,
-and waits for the resulting capture. Inject before the target creates its graphics device; late
-injection cannot recover resources that RenderDoc did not observe. Prefer `capture_program` when
-the executable can be launched directly. Neither tool terminates the target process.
+injects into the explicit PID, connects to the returned Target Control ident, requests one capture
+after the configured delay, and waits for the resulting file. It never takes foreground focus or
+emits a hotkey. Inject before the target creates its graphics device; late injection cannot recover
+resources that RenderDoc did not observe. Prefer `capture_program` when the executable can be
+launched directly. Neither tool terminates the target process.

@@ -64,10 +64,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[dev]"
-      - run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libx11-dev xvfb
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1 libgl1-mesa-dev libproxy1v5 libx11-dev xvfb
       - id: renderdoc
         shell: bash
         run: echo "path=$(python tools/download_latest_renderdoc.py --output .renderdoc-bin)" >> "$GITHUB_OUTPUT"
+      - name: Verify qrenderdoc runtime dependencies
+        shell: bash
+        run: |
+          qrenderdoc="$(dirname "${{ steps.renderdoc.outputs.path }}")/qrenderdoc"
+          missing="$(ldd "$qrenderdoc" | grep 'not found' || true)"
+          if [[ -n "$missing" ]]; then
+            echo "$missing"
+            exit 1
+          fi
       - name: Compile OpenGL capture target
         shell: bash
         run: |
@@ -75,6 +84,8 @@ jobs:
           cc tests/renderdoc_smoke.c -I"$(dirname "$header")" -lX11 -lGL -ldl -o tests/renderdoc_smoke
       - name: Capture and analyze a real frame
         shell: bash
+        env:
+          QT_QPA_PLATFORM: xcb
         run: xvfb-run -a python tests/live_renderdoc_smoke.py --renderdoc "${{ steps.renderdoc.outputs.path }}" --program tests/renderdoc_smoke
       - uses: actions/upload-artifact@v6
         if: always()
