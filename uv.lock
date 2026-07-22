@@ -393,7 +393,7 @@ wheels = [
 
 [[package]]
 name = "dcc-mcp-renderdoc"
-version = "0.3.2"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "dcc-mcp-core" },
