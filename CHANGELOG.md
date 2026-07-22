@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.1...v0.3.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* keep capture controller alive through trigger ([#11](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/11)) ([1fb7bed](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1fb7bed40dfb027b148a14cefd01c53028891d56))
+
 ## [0.3.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.0...v0.3.1) (2026-07-22)
 
 
