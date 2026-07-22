@@ -141,7 +141,7 @@ def _validate_target_control_status(status: Any) -> dict[str, Any]:
     }
     if not isinstance(status, dict) or set(status) != fields:
         raise RenderDocError("Target Control returned an invalid status schema")
-    if status["schema_version"] != 1:
+    if type(status["schema_version"]) is not int or status["schema_version"] != 1:
         raise RenderDocError("Target Control returned an unsupported status version")
     boolean_fields = ("connected", "triggered", "shutdown", "timed_out")
     if any(type(status[name]) is not bool for name in boolean_fields):
@@ -156,9 +156,10 @@ def _validate_target_control_status(status: Any) -> dict[str, Any]:
         raise RenderDocError("Target Control returned an invalid capture path")
     if status["error"] is not None and not isinstance(status["error"], str):
         raise RenderDocError("Target Control returned an invalid error field")
+    if status["error"] is not None:
+        raise RenderDocError(f"Target Control failed: {status['error'] or 'empty error'}")
     if (
-        status["error"]
-        or not status["connected"]
+        not status["connected"]
         or not status["triggered"]
         or not status["shutdown"]
         or status["timed_out"]
@@ -177,6 +178,7 @@ def _trigger_target_capture(
     capture_wait_secs: int,
     command: Optional[str],
     target_name: Optional[str] = None,
+    trigger_after_secs: float = 0.0,
 ) -> dict[str, Any]:
     if type(ident) is not int or ident <= 0:
         raise RenderDocError("RenderDoc target ident must be a positive integer")
@@ -184,6 +186,26 @@ def _trigger_target_capture(
         raise RenderDocError("Target Control timeout must be a positive integer")
     if target_name is not None and (not isinstance(target_name, str) or not target_name.strip()):
         raise RenderDocError("Target Control target name must be a non-empty string")
+    if (
+        isinstance(trigger_after_secs, bool)
+        or not isinstance(trigger_after_secs, (int, float))
+        or trigger_after_secs < 0
+    ):
+        raise RenderDocError("Target Control trigger delay must be a non-negative number")
+    if sys.platform not in {"win32", "linux"}:
+        raise RenderDocError(
+            "RenderDoc Target Control runtime is supported only on Windows and Linux"
+        )
+    if (
+        sys.platform == "linux"
+        and not os.environ.get("DISPLAY")
+        and not os.environ.get("WAYLAND_DISPLAY")
+        and not os.environ.get("QT_QPA_PLATFORM")
+    ):
+        raise RenderDocError(
+            "RenderDoc Target Control requires an X/Wayland display on Linux; "
+            "run under Xvfb or configure QT_QPA_PLATFORM explicitly"
+        )
     qrenderdoc = _resolve_qrenderdoc(command)
     script_path = Path(__file__).with_name("_target_control.py")
     if not script_path.is_file():
@@ -197,6 +219,7 @@ def _trigger_target_capture(
                 "DCC_MCP_RENDERDOC_TARGET_IDENT": str(ident),
                 "DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS": str(capture_wait_secs),
                 "DCC_MCP_RENDERDOC_TARGET_STATUS": str(status_path),
+                "DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS": str(trigger_after_secs),
             }
         )
         if target_name is not None:
@@ -209,13 +232,14 @@ def _trigger_target_capture(
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=capture_wait_secs + 30,
+                timeout=capture_wait_secs + int(trigger_after_secs) + 31,
                 shell=False,
                 env=environment,
             )
         except subprocess.TimeoutExpired as exc:
             raise RenderDocError(
-                f"Target Control host timed out after {capture_wait_secs + 30}s"
+                "Target Control host timed out after "
+                f"{capture_wait_secs + int(trigger_after_secs) + 31}s"
             ) from exc
         if not status_path.is_file():
             detail = (result.stderr or result.stdout or "no status output").strip()[-2000:]
@@ -235,6 +259,8 @@ def _capture_from_target_status(
         raise RenderDocError("Target Control returned a capture outside the requested RDC output")
     if not capture.is_file() or capture in before:
         raise RenderDocError("Target Control capture is missing or was not created by this request")
+    if capture.stat().st_size <= 0:
+        raise RenderDocError("Target Control capture is empty")
     return [capture]
 
 
@@ -301,6 +327,8 @@ def capture_program(
     cwd = Path(working_directory).expanduser().resolve() if working_directory else target.parent
     if not cwd.is_dir():
         raise RenderDocError(f"Working directory does not exist: {cwd}")
+    if trigger_process_name is not None and not hook_children:
+        raise RenderDocError("trigger_process_name requires hook_children=True")
 
     before = {path.resolve() for path in output.parent.glob("*.rdc")}
     cli_args = ["capture", "--working-dir", str(cwd), "--capture-file", str(output)]
@@ -321,12 +349,12 @@ def capture_program(
             command=command,
         )
         try:
-            time.sleep(max(0.0, trigger_after_secs))
             status = _trigger_target_capture(
                 controller.launched_id,
                 capture_wait_secs=capture_wait_secs,
                 command=command,
                 target_name=trigger_process_name,
+                trigger_after_secs=trigger_after_secs,
             )
             target_pid = status["target_pid"]
             captures = _capture_from_target_status(status, output.parent, before)
@@ -395,11 +423,11 @@ def capture_process(
         command=command,
     )
     try:
-        time.sleep(max(0.0, trigger_after_secs))
         status = _trigger_target_capture(
             controller.launched_id,
             capture_wait_secs=capture_wait_secs,
             command=command,
+            trigger_after_secs=trigger_after_secs,
         )
         if status["target_pid"] != process_id:
             raise RenderDocError(

@@ -14,7 +14,7 @@ tools:
       on-success: [renderdoc_capture__capture_program]
       on-failure: [dcc_diagnostics__audit_log]
   - name: capture_program
-    description: Launch one explicit executable under RenderDoc and return newly created .rdc files. With trigger_after_secs, request the frame through official local Target Control without foreground or keyboard input; trigger_process_name safely selects one matching child target. Use for controlled game or graphics test capture. Not for shell commands or attaching to an existing process.
+    description: Launch one explicit executable under RenderDoc and return newly created .rdc files. With trigger_after_secs, request the frame through official local Target Control without foreground or keyboard input. With hook_children enabled, trigger_process_name first checks the launched target, then follows only its official NewChild messages to select a unique matching child. Use for controlled game or graphics test capture. Not for shell commands or attaching to an existing process.
     input_schema:
       type: object
       required: [executable, output_template]

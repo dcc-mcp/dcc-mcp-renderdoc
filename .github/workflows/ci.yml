@@ -75,6 +75,8 @@ jobs:
           cc tests/renderdoc_smoke.c -I"$(dirname "$header")" -lX11 -lGL -ldl -o tests/renderdoc_smoke
       - name: Capture and analyze a real frame
         shell: bash
+        env:
+          QT_QPA_PLATFORM: xcb
         run: xvfb-run -a python tests/live_renderdoc_smoke.py --renderdoc "${{ steps.renderdoc.outputs.path }}" --program tests/renderdoc_smoke
       - uses: actions/upload-artifact@v6
         if: always()

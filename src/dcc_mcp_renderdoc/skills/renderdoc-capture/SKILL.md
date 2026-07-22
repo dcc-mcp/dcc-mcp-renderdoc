@@ -24,8 +24,13 @@ Call `get_version` before capture. `capture_program` starts only the explicit ex
 arguments, never a shell. Set `trigger_after_secs` to request one capture through RenderDoc's
 official local Target Control API. This headless trigger requires `qrenderdoc` beside
 `renderdoccmd`; it does not focus a window or synthesize keyboard input. `hook_children` remains a
-RenderDoc launch option. Set `trigger_process_name` when a named child target should be selected;
-the sidecar enumerates local Target Control idents and fails safely if none or more than one match.
+RenderDoc launch option. Set `trigger_process_name` only with `hook_children=true`; the sidecar
+checks the launched target first and, if its name differs, follows only its official `NewChild`
+messages to find a unique matching child. A child name without child hooking fails before launch.
+
+The official RenderDoc runtime supports Windows and Linux, not macOS (where this project runs
+Python unit tests only). On headless Linux, run the adapter under Xvfb or provide another working
+X/Wayland display; the official archive does not include Qt's `offscreen` platform plugin.
 
 Use `capture_process` when Steam or another platform client must launch the target first. It
 injects into the explicit PID, connects to the returned Target Control ident, requests one capture
