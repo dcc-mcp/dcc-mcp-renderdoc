@@ -29,7 +29,7 @@ tools:
         wait_for_exit: {type: boolean, default: true}
         api_validation: {type: boolean, default: false}
         hook_children: {type: boolean, default: false}
-        trigger_after_secs: {type: number, minimum: 0, maximum: 600}
+        trigger_after_secs: {type: number, minimum: 0, maximum: 900}
         trigger_process_name: {type: string, minLength: 1, maxLength: 260}
         capture_wait_secs: {type: integer, minimum: 1, maximum: 600, default: 30}
         timeout_secs: {type: integer, minimum: 1, maximum: 3600, default: 300}

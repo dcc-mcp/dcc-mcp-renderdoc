@@ -24,6 +24,22 @@ def test_bundled_skills_and_release_workflow_exist():
     assert (root / ".github" / "workflows" / "release.yml").is_file()
 
 
+def test_capture_program_accepts_ten_minute_boss_trigger():
+    root = Path(__file__).parents[1]
+    tools = (
+        root / "src" / "dcc_mcp_renderdoc" / "skills" / "renderdoc-capture" / "tools.yaml"
+    ).read_text(encoding="utf-8")
+    capture_program = re.search(
+        r"  - name: capture_program(?P<body>.*?)(?=\n  - name:)", tools, re.DOTALL
+    )
+    assert capture_program is not None
+    maximum = re.search(
+        r"trigger_after_secs: \{[^}]*maximum: (?P<seconds>\d+)", capture_program.group("body")
+    )
+    assert maximum is not None
+    assert int(maximum.group("seconds")) >= 612
+
+
 def test_runtime_version_matches_distribution_metadata():
     root = Path(__file__).parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
