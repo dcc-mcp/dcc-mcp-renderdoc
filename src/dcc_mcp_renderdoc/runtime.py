@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -17,6 +18,81 @@ from typing import Any, Iterable, Optional, Sequence
 
 class RenderDocError(RuntimeError):
     """Raised when a RenderDoc operation cannot satisfy its contract."""
+
+
+class _CaptureController:
+    def __init__(self, process: Any, stdout: list[str], stderr: list[str], readers: list[Any]):
+        self.process = process
+        self.stdout = stdout
+        self.stderr = stderr
+        self.readers = readers
+
+    def output(self) -> tuple[str, str]:
+        return "".join(self.stdout), "".join(self.stderr)
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        for reader in self.readers:
+            reader.join(timeout=1)
+
+
+def _start_capture_controller(
+    arguments: Sequence[str], *, timeout_secs: int, command: Optional[str]
+) -> _CaptureController:
+    executable = resolve_renderdoccmd(command)
+    try:
+        process = subprocess.Popen(
+            [str(executable), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+        )
+    except OSError as exc:
+        raise RenderDocError(f"Could not start RenderDoc: {exc}") from exc
+
+    stdout: list[str] = []
+    stderr: list[str] = []
+
+    def read_stream(stream: Any, output: list[str]) -> None:
+        for chunk in iter(lambda: stream.read(1), ""):
+            output.append(chunk)
+
+    readers = [
+        threading.Thread(target=read_stream, args=(process.stdout, stdout), daemon=True),
+        threading.Thread(target=read_stream, args=(process.stderr, stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    controller = _CaptureController(process, stdout, stderr, readers)
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        combined = "".join(stdout + stderr)
+        launched = re.search(r"Launched as ID (\d+)", combined)
+        returncode = process.poll()
+        if launched is not None:
+            launched_id = int(launched.group(1))
+            if returncode is None or returncode in (0, launched_id):
+                return controller
+        if returncode is not None:
+            controller.close()
+            detail = "".join(controller.output()).strip()[-2000:] or "unknown error"
+            raise RenderDocError(f"RenderDoc exited with code {returncode}: {detail}")
+        if time.monotonic() >= deadline:
+            controller.close()
+            detail = "".join(controller.output()).strip()[-2000:]
+            suffix = f": {detail}" if detail else ""
+            raise RenderDocError(
+                f"RenderDoc command timed out waiting for {arguments[0]} readiness after "
+                f"{timeout_secs}s{suffix}"
+            )
+        time.sleep(0.01)
 
 
 def resolve_renderdoccmd(explicit: Optional[str] = None) -> Path:
@@ -115,23 +191,33 @@ def capture_program(
     if hook_children:
         cli_args.append("--opt-hook-children")
     cli_args.extend([str(target), *(str(value) for value in arguments or [])])
-    result = _run(
-        cli_args,
-        timeout_secs=timeout_secs,
-        command=command,
-        accept_launched_id=not effective_wait_for_exit,
-    )
     target_pid: Optional[int] = None
     if trigger_after_secs is not None:
-        time.sleep(max(0.0, trigger_after_secs))
-        target_pid, focused, captures = _wait_for_triggered_capture(
-            output.parent,
-            before,
-            process_name,
-            visible_before_launch,
-            capture_wait_secs,
+        controller = _start_capture_controller(
+            cli_args,
+            timeout_secs=timeout_secs,
+            command=command,
         )
+        try:
+            time.sleep(max(0.0, trigger_after_secs))
+            target_pid, focused, captures = _wait_for_triggered_capture(
+                output.parent,
+                before,
+                process_name,
+                visible_before_launch,
+                capture_wait_secs,
+            )
+        finally:
+            controller.close()
+        stdout, stderr = controller.output()
     else:
+        result = _run(
+            cli_args,
+            timeout_secs=timeout_secs,
+            command=command,
+            accept_launched_id=not effective_wait_for_exit,
+        )
+        stdout, stderr = result.stdout, result.stderr
         focused = False
         captures = _new_captures(output.parent, before)
     injection_error: Optional[str] = None
@@ -157,9 +243,7 @@ def capture_program(
         except RenderDocError as exc:
             injection_error = str(exc)
     if not captures:
-        output_detail = "\n".join(
-            part.strip() for part in (result.stdout, result.stderr) if part.strip()
-        )[-2000:]
+        output_detail = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())[-2000:]
         diagnostics = _capture_failure_diagnostics(
             process_id=target_pid,
             process_name=trigger_process_name or target.name,
@@ -175,7 +259,7 @@ def capture_program(
         "target": str(target),
         "captures": [str(path) for path in captures],
         "focused_target_window": focused,
-        "stdout": result.stdout.strip(),
+        "stdout": stdout.strip(),
     }
 
 
@@ -204,34 +288,36 @@ def capture_process(
         cli_args.extend(["--working-dir", str(cwd)])
     if api_validation:
         cli_args.append("--opt-api-validation")
-    result = _run(
+    controller = _start_capture_controller(
         cli_args,
         timeout_secs=timeout_secs,
         command=command,
-        accept_launched_id=True,
     )
-    time.sleep(max(0.0, trigger_after_secs))
-    focused = _trigger_capture_hotkey(process_id)
-    captures = _wait_for_captures(output.parent, before, capture_wait_secs)
+    try:
+        time.sleep(max(0.0, trigger_after_secs))
+        focused = _trigger_capture_hotkey(process_id)
+        captures = _wait_for_captures(output.parent, before, capture_wait_secs)
+    finally:
+        controller.close()
+    stdout, stderr = controller.output()
     if not captures:
-        output_detail = "\n".join(
-            part.strip() for part in (result.stdout, result.stderr) if part.strip()
-        )[-2000:]
+        output_detail = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())[-2000:]
         diagnostics = _capture_failure_diagnostics(
             process_id=process_id,
             process_name=None,
             focused=focused,
         )
         raise RenderDocError(
-            "No .rdc capture appeared after injection and F12; ensure the target window is visible "
-            f"and uses a graphics API supported by RenderDoc. {diagnostics}. "
+            "No .rdc capture appeared after injection and F12. Inject before the target creates "
+            "its graphics device; for an already initialized game, relaunch it with "
+            f"capture_program. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
         )
     return {
         "process_id": process_id,
         "captures": [str(path) for path in captures],
         "focused_target_window": focused,
-        "stdout": result.stdout.strip(),
+        "stdout": stdout.strip(),
     }
 
 

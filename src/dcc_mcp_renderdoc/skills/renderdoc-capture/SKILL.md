@@ -27,4 +27,6 @@ focus before F12.
 
 Use `capture_process` when Steam or another platform client must launch the target first. It
 injects into the explicit PID, focuses that visible window, triggers F12 after the requested delay,
-and waits for the resulting capture. Neither tool terminates the target process.
+and waits for the resulting capture. Inject before the target creates its graphics device; late
+injection cannot recover resources that RenderDoc did not observe. Prefer `capture_program` when
+the executable can be launched directly. Neither tool terminates the target process.

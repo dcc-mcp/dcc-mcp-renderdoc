@@ -46,7 +46,7 @@ tools:
       on-success: [renderdoc_analysis__inspect_capture, renderdoc_analysis__export_thumbnail]
       on-failure: [dcc_diagnostics__audit_log]
   - name: capture_process
-    description: Inject RenderDoc into one visible Windows process, focus its window, trigger F12 after a delay, and return the new .rdc file. Use when a game must be launched by its platform client. Not for hidden services or process termination.
+    description: Inject RenderDoc into one Windows process before it creates its graphics device, focus its visible window, trigger F12 after a delay, and return the new .rdc file. Use when a game must be launched by its platform client. Prefer capture_program for an already initialized game; not for hidden services or process termination.
     input_schema:
       type: object
       required: [process_id, output_template]
