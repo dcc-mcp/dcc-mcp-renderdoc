@@ -184,6 +184,11 @@ def test_target_control_trigger_uses_bundled_qrenderdoc_status(monkeypatch, tmp_
         observed.update(arguments=arguments, kwargs=kwargs)
         script = Path(arguments[-1])
         observed["script"] = script.read_text(encoding="utf-8")
+        observed["config"] = json.loads(
+            (Path(kwargs["env"]["APPDATA"]) / "qrenderdoc" / "UI.config").read_text(
+                encoding="utf-8"
+            )
+        )
         Path(kwargs["env"]["DCC_MCP_RENDERDOC_TARGET_STATUS"]).write_text(
             json.dumps(
                 {
@@ -217,6 +222,10 @@ def test_target_control_trigger_uses_bundled_qrenderdoc_status(monkeypatch, tmp_
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS"] == "30"
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS"] == "4"
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TARGET_NAME"] == "child.exe"
+    assert observed["config"] == {
+        "Analytics_TotalOptOut": True,
+        "rdocConfigData": 1,
+    }
     assert 'CreateTargetControl("", ident, "dcc-mcp-renderdoc", False)' in observed["script"]
     assert "TriggerCapture(1)" in observed["script"]
     assert "finally:" in observed["script"]
@@ -263,6 +272,36 @@ def test_target_control_reports_connection_failure_from_status(monkeypatch, tmp_
     monkeypatch.setattr(runtime.subprocess, "run", fake_run)
 
     with pytest.raises(runtime.RenderDocError, match="connection refused"):
+        runtime._trigger_target_capture(12, capture_wait_secs=1, command=str(command))
+
+
+def test_target_control_rejects_nonzero_host_exit_even_with_success_status(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd.exe"
+    command.touch()
+    command.with_name("qrenderdoc.exe").touch()
+
+    def fake_run(arguments, **kwargs):
+        Path(kwargs["env"]["DCC_MCP_RENDERDOC_TARGET_STATUS"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "connected": True,
+                    "triggered": True,
+                    "shutdown": True,
+                    "timed_out": False,
+                    "target_pid": 42,
+                    "capture_path": str(tmp_path / "capture.rdc"),
+                    "error": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        kwargs["stderr"].write("host failed")
+        return CompletedProcess(arguments, 7)
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    with pytest.raises(runtime.RenderDocError, match="exited with code 7: host failed"):
         runtime._trigger_target_capture(12, capture_wait_secs=1, command=str(command))
 
 
@@ -345,13 +384,22 @@ def test_target_control_host_timeout_cleans_temporary_script(monkeypatch, tmp_pa
 
     def fake_run(arguments, **kwargs):
         observed["directory"] = Path(kwargs["env"]["DCC_MCP_RENDERDOC_TARGET_STATUS"]).parent
+        Path(kwargs["env"]["DCC_MCP_RENDERDOC_TARGET_STATUS"]).write_text(
+            '{"phase":"started"}', encoding="utf-8"
+        )
+        kwargs["stdout"].write("qrenderdoc started")
+        kwargs["stderr"].write("qrenderdoc blocked")
         raise TimeoutExpired(arguments, 31)
 
     monkeypatch.setattr(runtime.subprocess, "run", fake_run)
 
-    with pytest.raises(runtime.RenderDocError, match="host timed out after 32s"):
+    with pytest.raises(runtime.RenderDocError, match="host timed out after 32s") as error:
         runtime._trigger_target_capture(12, capture_wait_secs=1, command=str(command))
 
+    assert '"target_ident": 12' in str(error.value)
+    assert '"status": "{\\"phase\\":\\"started\\"}"' in str(error.value)
+    assert '"stdout": "qrenderdoc started"' in str(error.value)
+    assert '"stderr": "qrenderdoc blocked"' in str(error.value)
     assert not observed["directory"].exists()
 
 
@@ -441,6 +489,11 @@ def test_target_control_preserves_explicit_linux_qt_platform(monkeypatch, tmp_pa
 
     def fake_run(arguments, **kwargs):
         observed["environment"] = kwargs["env"]
+        observed["config"] = json.loads(
+            (Path(kwargs["env"]["XDG_DATA_HOME"]) / "qrenderdoc" / "UI.config").read_text(
+                encoding="utf-8"
+            )
+        )
         Path(kwargs["env"]["DCC_MCP_RENDERDOC_TARGET_STATUS"]).write_text(
             json.dumps(
                 {
@@ -467,6 +520,10 @@ def test_target_control_preserves_explicit_linux_qt_platform(monkeypatch, tmp_pa
     runtime._trigger_target_capture(12, capture_wait_secs=1, command=str(command))
 
     assert observed["environment"]["QT_QPA_PLATFORM"] == "xcb"
+    assert observed["config"] == {
+        "Analytics_TotalOptOut": True,
+        "rdocConfigData": 1,
+    }
 
 
 def test_target_control_rejects_unsupported_macos_runtime(monkeypatch, tmp_path):
@@ -728,6 +785,8 @@ def test_bundled_target_control_follows_new_child_from_launched_parent(
     status_path = tmp_path / "status.json"
     capture_path = tmp_path / "capture_frame1.rdc"
     calls = []
+    triggered = [False]
+    clock = [0.0]
 
     class Parent:
         def __init__(self):
@@ -750,6 +809,7 @@ def test_bundled_target_control_follows_new_child_from_launched_parent(
                     type="new-child",
                     newChild=SimpleNamespace(ident=38927, processId=200),
                 )
+            clock[0] = 0.26
             return SimpleNamespace(type="noop")
 
         def Shutdown(self):
@@ -767,9 +827,12 @@ def test_bundled_target_control_follows_new_child_from_launched_parent(
 
         def TriggerCapture(self, frames):
             calls.append(("child-trigger", frames))
+            triggered[0] = True
 
         def ReceiveMessage(self, progress):
             calls.append(("child-receive", progress))
+            if not triggered[0]:
+                return SimpleNamespace(type="noop")
             return SimpleNamespace(
                 type="new-capture",
                 newCapture=SimpleNamespace(path=str(capture_path)),
@@ -795,8 +858,7 @@ def test_bundled_target_control_follows_new_child_from_launched_parent(
     monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS", "1")
     monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_STATUS", str(status_path))
     monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_NAME", "child.exe")
-    clock = iter([0.0, 0.0, 0.0, 0.1, 0.1, 0.3, 0.3, 0.3, 0.3])
-    monkeypatch.setattr(time, "monotonic", lambda: next(clock, 0.3))
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     with pytest.raises(SystemExit):
@@ -810,6 +872,7 @@ def test_bundled_target_control_follows_new_child_from_launched_parent(
     assert calls == [
         ("parent-receive", None),
         ("parent-receive", None),
+        ("child-receive", None),
         ("parent-shutdown",),
         ("child-trigger", 1),
         ("child-receive", None),
@@ -1003,6 +1066,193 @@ def test_bundled_target_control_rejects_multiple_matching_siblings(monkeypatch, 
     assert "multiple child targets matched child.exe" in status["error"]
     assert sorted(value for value in shutdowns if isinstance(value, int)) == [200, 201, 202]
     assert shutdowns[-1] == "parent"
+
+
+def test_bundled_target_control_rejects_late_matching_sibling_before_long_delay(
+    monkeypatch, tmp_path
+):
+    status_path = tmp_path / "status.json"
+    clock = [0.0]
+    messages = iter(
+        [
+            (
+                0.0,
+                SimpleNamespace(
+                    type="new-child",
+                    newChild=SimpleNamespace(ident=38927, processId=200),
+                ),
+            ),
+            (0.26, SimpleNamespace(type="noop")),
+            (
+                300.0,
+                SimpleNamespace(
+                    type="new-child",
+                    newChild=SimpleNamespace(ident=38928, processId=201),
+                ),
+            ),
+        ]
+    )
+    shutdowns = []
+
+    class Parent:
+        def Connected(self):
+            return True
+
+        def GetTarget(self):
+            return "launcher.exe"
+
+        def ReceiveMessage(self, _progress):
+            timestamp, message = next(messages)
+            clock[0] = timestamp
+            return message
+
+        def Shutdown(self):
+            shutdowns.append("parent")
+
+    class Child:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def Connected(self):
+            return True
+
+        def GetPID(self):
+            return self.pid
+
+        def GetTarget(self):
+            return "child.exe"
+
+        def ReceiveMessage(self, _progress):
+            return SimpleNamespace(type="noop")
+
+        def TriggerCapture(self, _frames):
+            pytest.fail("ambiguous child target must not be triggered")
+
+        def Shutdown(self):
+            shutdowns.append(self.pid)
+
+    targets = {38920: Parent(), 38927: Child(200), 38928: Child(201)}
+    monkeypatch.setitem(
+        sys.modules,
+        "renderdoc",
+        SimpleNamespace(
+            CreateTargetControl=lambda _url, ident, _client, _force: targets[ident],
+            TargetControlMessageType=SimpleNamespace(
+                NewChild="new-child",
+                NewCapture="new-capture",
+                Disconnected="disconnected",
+            ),
+        ),
+    )
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_IDENT", "38920")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS", "10")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS", "612")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_STATUS", str(status_path))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_NAME", "child.exe")
+
+    with pytest.raises(SystemExit):
+        runpy.run_path(
+            str(Path(runtime.__file__).with_name("_target_control.py")),
+            run_name="__main__",
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert "multiple child targets matched child.exe" in status["error"]
+    assert sorted(value for value in shutdowns if isinstance(value, int)) == [200, 201]
+    assert shutdowns[-1] == "parent"
+
+
+def test_bundled_target_control_keeps_unique_child_when_parent_disconnects(monkeypatch, tmp_path):
+    status_path = tmp_path / "status.json"
+    capture_path = tmp_path / "capture_frame1.rdc"
+    calls = []
+    clock = [0.0]
+    messages = iter(
+        [
+            SimpleNamespace(
+                type="new-child",
+                newChild=SimpleNamespace(ident=38927, processId=200),
+            ),
+            SimpleNamespace(type="disconnected"),
+        ]
+    )
+    triggered = [False]
+
+    class Parent:
+        def Connected(self):
+            return True
+
+        def GetTarget(self):
+            return "launcher.exe"
+
+        def ReceiveMessage(self, _progress):
+            message = next(messages)
+            if message.type == "disconnected":
+                clock[0] = 2.0
+            return message
+
+        def Shutdown(self):
+            calls.append(("parent-shutdown",))
+
+    class Child:
+        def Connected(self):
+            return True
+
+        def GetPID(self):
+            return 200
+
+        def GetTarget(self):
+            return "child.exe"
+
+        def ReceiveMessage(self, _progress):
+            if triggered[0]:
+                return SimpleNamespace(
+                    type="new-capture",
+                    newCapture=SimpleNamespace(path=str(capture_path)),
+                )
+            return SimpleNamespace(type="noop")
+
+        def TriggerCapture(self, frames):
+            calls.append(("trigger", frames))
+            triggered[0] = True
+
+        def Shutdown(self):
+            calls.append(("child-shutdown",))
+
+    targets = {38920: Parent(), 38927: Child()}
+    monkeypatch.setitem(
+        sys.modules,
+        "renderdoc",
+        SimpleNamespace(
+            CreateTargetControl=lambda _url, ident, _client, _force: targets[ident],
+            TargetControlMessageType=SimpleNamespace(
+                NewChild="new-child",
+                NewCapture="new-capture",
+                Disconnected="disconnected",
+            ),
+        ),
+    )
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_IDENT", "38920")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS", "10")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS", "2")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_STATUS", str(status_path))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_TARGET_NAME", "child.exe")
+
+    with pytest.raises(SystemExit):
+        runpy.run_path(
+            str(Path(runtime.__file__).with_name("_target_control.py")),
+            run_name="__main__",
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["target_pid"] == 200
+    assert status["capture_path"] == str(capture_path)
+    assert status["error"] is None
+    assert calls == [("parent-shutdown",), ("trigger", 1), ("child-shutdown",)]
 
 
 def test_bundled_target_control_uses_one_shared_capture_deadline(monkeypatch, tmp_path):

@@ -88,7 +88,9 @@ Pass `trigger_after_secs` to `capture_program` for a Target Control trigger. Thi
 `qrenderdoc` beside `renderdoccmd`. The official RenderDoc runtime supports Windows and Linux;
 macOS is covered only by this project's Python unit tests. Linux Target Control requires an X or
 Wayland display, so headless hosts must run under Xvfb (or explicitly configure a working Qt
-platform). The official Linux archive does not bundle Qt's `offscreen` platform plugin.
+platform). The official Linux archive does not bundle Qt's `offscreen` platform plugin. Each
+sidecar uses an isolated Qt data profile with RenderDoc analytics explicitly opted out, preventing
+the first-run consent dialog without reading or changing the user's qrenderdoc configuration.
 
 When a launcher creates the rendered child process, set `hook_children=true` and pass
 `trigger_process_name`. The adapter first checks the launched target itself; if its name does not

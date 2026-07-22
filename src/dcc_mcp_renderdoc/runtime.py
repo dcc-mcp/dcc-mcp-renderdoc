@@ -181,6 +181,31 @@ def _validate_target_control_status(status: Any) -> dict[str, Any]:
     return status
 
 
+def _configure_qrenderdoc_environment(root: Path, environment: dict[str, str]) -> None:
+    if sys.platform == "linux":
+        config_root = root / "xdg-data"
+        environment["XDG_DATA_HOME"] = str(config_root)
+    elif sys.platform == "win32":
+        config_root = root / "appdata-roaming"
+        environment["APPDATA"] = str(config_root)
+        environment["LOCALAPPDATA"] = str(root / "appdata-local")
+    else:
+        return
+    config_directory = config_root / "qrenderdoc"
+    config_directory.mkdir(parents=True)
+    (config_directory / "UI.config").write_text(
+        json.dumps({"Analytics_TotalOptOut": True, "rdocConfigData": 1}),
+        encoding="utf-8",
+    )
+
+
+def _read_diagnostic_tail(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()[-2000:]
+    except OSError:
+        return ""
+
+
 def _trigger_target_capture(
     ident: int,
     *,
@@ -235,23 +260,58 @@ def _trigger_target_capture(
             environment["DCC_MCP_RENDERDOC_TARGET_NAME"] = target_name
         else:
             environment.pop("DCC_MCP_RENDERDOC_TARGET_NAME", None)
+        _configure_qrenderdoc_environment(root, environment)
+        stdout_path = root / "qrenderdoc.stdout.log"
+        stderr_path = root / "qrenderdoc.stderr.log"
         try:
-            result = subprocess.run(
-                [str(qrenderdoc), "--python", str(script_path)],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=capture_wait_secs + int(trigger_after_secs) + 31,
-                shell=False,
-                env=environment,
-            )
+            with (
+                stdout_path.open("w", encoding="utf-8") as stdout,
+                stderr_path.open("w", encoding="utf-8") as stderr,
+            ):
+                result = subprocess.run(
+                    [str(qrenderdoc), "--python", str(script_path)],
+                    check=False,
+                    stdout=stdout,
+                    stderr=stderr,
+                    text=True,
+                    timeout=capture_wait_secs + int(trigger_after_secs) + 31,
+                    shell=False,
+                    env=environment,
+                )
         except subprocess.TimeoutExpired as exc:
+            diagnostics = {
+                "target_ident": ident,
+                "target_name": target_name,
+                "capture_wait_secs": capture_wait_secs,
+                "trigger_after_secs": trigger_after_secs,
+                "qt_qpa_platform": environment.get("QT_QPA_PLATFORM"),
+                "display_configured": bool(
+                    environment.get("DISPLAY") or environment.get("WAYLAND_DISPLAY")
+                ),
+                "status": _read_diagnostic_tail(status_path) or "missing",
+                "stdout": _read_diagnostic_tail(stdout_path),
+                "stderr": _read_diagnostic_tail(stderr_path),
+            }
             raise RenderDocError(
                 "Target Control host timed out after "
-                f"{capture_wait_secs + int(trigger_after_secs) + 31}s"
+                f"{capture_wait_secs + int(trigger_after_secs) + 31}s; "
+                f"diagnostics={json.dumps(diagnostics, sort_keys=True)}"
             ) from exc
+        if result.returncode != 0:
+            detail = (
+                _read_diagnostic_tail(stderr_path)
+                or _read_diagnostic_tail(stdout_path)
+                or "no host output"
+            )
+            raise RenderDocError(
+                f"Target Control host exited with code {result.returncode}: {detail}"
+            )
         if not status_path.is_file():
-            detail = (result.stderr or result.stdout or "no status output").strip()[-2000:]
+            detail = (
+                _read_diagnostic_tail(stderr_path)
+                or _read_diagnostic_tail(stdout_path)
+                or "no status output"
+            )
             raise RenderDocError(f"Target Control did not write status: {detail}")
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))

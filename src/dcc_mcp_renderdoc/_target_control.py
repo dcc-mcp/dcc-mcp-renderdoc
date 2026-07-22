@@ -41,13 +41,19 @@ def _target_name_matches(actual, expected):
     )
 
 
-def _wait_for_child_target(rd, parent, target_name, deadline):
+def _wait_for_child_target(rd, parent, target_name, trigger_at, deadline):
     matches = []
     quiet_deadline = None
     try:
         while time.monotonic() < deadline:
-            if quiet_deadline is not None and time.monotonic() >= quiet_deadline:
-                break
+            now = time.monotonic()
+            if (
+                len(matches) == 1
+                and quiet_deadline is not None
+                and now >= trigger_at
+                and now >= quiet_deadline
+            ):
+                return matches.pop()
             message = parent.ReceiveMessage(None)
             if message is not None and message.type == rd.TargetControlMessageType.NewChild:
                 child_ident = int(message.newChild.ident)
@@ -65,17 +71,26 @@ def _wait_for_child_target(rd, parent, target_name, deadline):
                     if child is not None:
                         child.Shutdown()
                 if matches:
+                    if len(matches) > 1:
+                        raise RuntimeError("multiple child targets matched {}".format(target_name))
                     quiet_deadline = time.monotonic() + 0.25
                     if quiet_deadline > deadline:
                         raise RuntimeError("insufficient time to select a unique child target")
                 continue
             if message is not None and message.type == rd.TargetControlMessageType.Disconnected:
+                if len(matches) == 1:
+                    return matches.pop()
                 raise RuntimeError("RenderDoc parent Target Control disconnected before child")
+            for match in matches:
+                child_message = match.ReceiveMessage(None)
+                if (
+                    child_message is not None
+                    and child_message.type == rd.TargetControlMessageType.Disconnected
+                ):
+                    raise RuntimeError("RenderDoc child Target Control disconnected before trigger")
             time.sleep(0.05)
         if len(matches) == 1:
-            return matches.pop()
-        if len(matches) > 1:
-            raise RuntimeError("multiple child targets matched {}".format(target_name))
+            raise RuntimeError("insufficient time to select a unique child target")
         raise RuntimeError("no child target matched {}".format(target_name))
     finally:
         for match in matches:
@@ -114,7 +129,7 @@ def main():
         capture_deadline = trigger_at + capture_wait_secs
         target = _open_target(rd, ident)
         if target_name and not _target_name_matches(target.GetTarget(), target_name):
-            child = _wait_for_child_target(rd, target, target_name, capture_deadline)
+            child = _wait_for_child_target(rd, target, target_name, trigger_at, capture_deadline)
             try:
                 target.Shutdown()
             except BaseException:
