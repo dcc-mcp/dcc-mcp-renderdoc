@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.0...v0.3.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* allow long-running frame trigger delays ([#10](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/10)) ([3212cf7](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3212cf7c9f236b28b48bf0d28705e2b1939fbe21))
+* capture relaunched child processes ([39e5603](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/39e5603112c8cad98807da3fee86248dd03fb824))
+
+
+### Documentation
+
+* align agent workflow and branding ([ca8b2cf](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ca8b2cf955a470a87efde24c12e9ebbdb284633c))
+* document CLI install and updates ([599cc70](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/599cc70445e11c2fc53d2626c24f9912365b87e0))
+
 ## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.2.1...v0.3.0) (2026-07-16)
 
 
