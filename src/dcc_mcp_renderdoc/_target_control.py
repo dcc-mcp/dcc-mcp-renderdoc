@@ -25,8 +25,8 @@ def _open_target(rd, ident):
 
 
 def _target_name_matches(actual, expected):
-    actual = os.path.basename(actual).casefold()
-    expected = os.path.basename(expected).casefold()
+    actual = str(actual).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    expected = str(expected).replace("\\", "/").rsplit("/", 1)[-1].casefold()
     return (
         actual == expected
         or (actual.endswith(".exe") and actual[:-4] == expected)

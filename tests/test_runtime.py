@@ -437,7 +437,10 @@ def test_bundled_target_control_fails_immediately_on_disconnect(monkeypatch, tmp
     assert "disconnected before capture" in status["error"]
 
 
-def test_bundled_target_control_selects_named_target_across_idents(monkeypatch, tmp_path):
+@pytest.mark.parametrize("actual_target", ["C:\\games\\child", "/games/child"])
+def test_bundled_target_control_selects_named_target_across_idents(
+    monkeypatch, tmp_path, actual_target
+):
     status_path = tmp_path / "status.json"
     capture_path = tmp_path / "capture_frame1.rdc"
     calls = []
@@ -470,7 +473,7 @@ def test_bundled_target_control_selects_named_target_across_idents(monkeypatch, 
 
     targets = {
         38920: Target("launcher.exe", 100),
-        38927: Target("C:\\games\\child", 200),
+        38927: Target(actual_target, 200),
     }
     next_ident = {0: 38920, 38920: 38927, 38927: 0}
     monkeypatch.setitem(
