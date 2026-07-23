@@ -70,9 +70,12 @@ def download_latest() -> Path:
     archive = _cache_root() / archive_name
     _cache_root().mkdir(parents=True, exist_ok=True)
     try:
-        with urllib.request.urlopen(
-            f"https://renderdoc.org/stable/{version}/{archive_name}", timeout=120
-        ) as response, archive.open("wb") as stream:
+        with (
+            urllib.request.urlopen(
+                f"https://renderdoc.org/stable/{version}/{archive_name}", timeout=120
+            ) as response,
+            archive.open("wb") as stream,
+        ):
             shutil.copyfileobj(response, stream)
         _extract(archive, destination)
     finally:
