@@ -32,6 +32,23 @@ def _default_target_control_delay(monkeypatch):
     monkeypatch.setattr(runtime.sys, "platform", "win32")
 
 
+@pytest.fixture
+def valid_frame_captures(monkeypatch):
+    monkeypatch.setattr(
+        runtime,
+        "_validate_frame_captures",
+        lambda captures, **_kwargs: [
+            {
+                "capture_file": str(capture),
+                "draw_dispatch_count": 1,
+                "frame_work_count": 1,
+                "frame_content_status": "rendering_commands_present",
+            }
+            for capture in captures
+        ],
+    )
+
+
 def test_parse_capture_xml_summarizes_stable_fields(tmp_path: Path):
     xml_file = tmp_path / "capture.xml"
     xml_file.write_text(
@@ -47,8 +64,88 @@ def test_parse_capture_xml_summarizes_stable_fields(tmp_path: Path):
     assert result["driver"] == {"id": "2", "name": "Vulkan"}
     assert result["thumbnail"] == {"width": 640, "height": 360}
     assert result["chunk_count"] == 3
+    assert result["draw_dispatch_count"] == 2
+    assert result["frame_work_count"] == 2
+    assert result["present_count"] == 1
+    assert result["frame_content_status"] == "rendering_commands_present"
     assert result["chunk_frequencies"][0] == {"name": "vkCmdDraw", "count": 2}
     assert result["representative_chunks"] == ["vkCmdDraw", "vkCmdDraw"]
+
+
+def test_parse_capture_xml_accepts_clear_and_copy_only_frame_work(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="1">D3D11</driver></header><chunks version="1">
+        <chunk name="ID3D11DeviceContext::ClearRenderTargetView"/>
+        <chunk name="ID3D11DeviceContext::CopyResource"/>
+        <chunk name="IDXGISwapChain::Present"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 2
+    assert result["frame_content_status"] == "rendering_commands_present"
+
+
+def test_parse_capture_xml_rejects_opengl_state_only_frame(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="3">OpenGL</driver></header><chunks version="1">
+        <chunk name="glDrawBuffer"/><chunk name="glDrawBuffers"/>
+        <chunk name="glNamedFramebufferDrawBuffer"/>
+        <chunk name="glNamedFramebufferDrawBuffers"/>
+        <chunk name="glClearColor"/><chunk name="glClearDepth"/>
+        <chunk name="glClearStencil"/><chunk name="SwapBuffers"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 0
+    assert result["present_count"] == 1
+    assert result["frame_content_status"] == "no_rendering_work"
+
+
+def test_parse_capture_xml_accepts_vulkan_render_pass_work(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="2">Vulkan</driver></header><chunks version="1">
+        <chunk name="vkCmdBeginRenderPass"/><chunk name="vkCmdBeginRendering"/>
+        <chunk name="vkQueuePresentKHR"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 2
+    assert result["present_count"] == 1
+    assert result["frame_content_status"] == "rendering_commands_present"
+
+
+def test_parse_capture_xml_accepts_explicit_command_list_execution(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="2">Vulkan</driver></header><chunks version="1">
+        <chunk name="vkCmdExecuteCommands"/>
+        <chunk name="ID3D11DeviceContext::ExecuteCommandList"/>
+        <chunk name="ID3D12CommandQueue::ExecuteCommandLists"/>
+        <chunk name="vkQueuePresentKHR"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 3
+    assert result["present_count"] == 1
 
 
 def test_resolve_renderdoccmd_prefers_explicit_file(tmp_path: Path):
@@ -63,8 +160,17 @@ def test_capture_program_uses_argument_vector_and_reports_new_capture(tmp_path, 
     observed = {}
 
     def fake_run(arguments, **_kwargs):
-        observed["arguments"] = arguments
-        (tmp_path / "capture_frame1.rdc").write_bytes(b"rdc")
+        if arguments[0] == "capture":
+            observed["arguments"] = arguments
+            (tmp_path / "capture_frame1.rdc").write_bytes(b"rdc")
+        elif arguments[0] == "convert":
+            xml_file = Path(arguments[arguments.index("--output") + 1])
+            xml_file.write_text(
+                """<rdc><header><driver id="2">Vulkan</driver></header><chunks version="1">
+                <chunk name="vkCmdDrawIndexed"/><chunk name="Present"/>
+                </chunks></rdc>""",
+                encoding="utf-8",
+            )
         return CompletedProcess(arguments, 0, "captured", "")
 
     monkeypatch.setattr(runtime, "_run", fake_run)
@@ -76,6 +182,36 @@ def test_capture_program_uses_argument_vector_and_reports_new_capture(tmp_path, 
 
     assert observed["arguments"][-3:] == [str(target.resolve()), "--scene", "demo"]
     assert result["captures"] == [str((tmp_path / "capture_frame1.rdc").resolve())]
+    assert result["capture_validations"][0]["draw_dispatch_count"] == 1
+
+
+def test_capture_program_rejects_present_only_capture_and_preserves_rdc(tmp_path, monkeypatch):
+    target = tmp_path / "game.exe"
+    target.touch()
+    capture = tmp_path / "capture_frame1.rdc"
+
+    def fake_run(arguments, **_kwargs):
+        if arguments[0] == "capture":
+            capture.write_bytes(b"rdc")
+        elif arguments[0] == "convert":
+            xml_file = Path(arguments[arguments.index("--output") + 1])
+            xml_file.write_text(
+                """<rdc><header><driver id="1">D3D11</driver></header><chunks version="1">
+                <chunk name="Internal::Drawcall Metadata"/>
+                <chunk name="ID3D11DeviceContext::RSSetViewports"/>
+                <chunk name="ID3D11DeviceContext::ClearState"/>
+                <chunk name="IDXGISwapChain::Present"/>
+                </chunks></rdc>""",
+                encoding="utf-8",
+            )
+        return CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(runtime, "_run", fake_run)
+
+    with pytest.raises(runtime.RenderDocError, match="no rendering work"):
+        runtime.capture_program(str(target), str(tmp_path / "capture"))
+
+    assert capture.is_file()
 
 
 def test_non_waiting_launch_accepts_renderdoc_target_id(monkeypatch, tmp_path):
@@ -1395,7 +1531,7 @@ def test_bundled_target_control_is_python36_compatible():
     ast.parse(source, feature_version=(3, 6))
 
 
-def test_capture_program_reuses_target_control_trigger(tmp_path, monkeypatch):
+def test_capture_program_reuses_target_control_trigger(tmp_path, monkeypatch, valid_frame_captures):
     target = tmp_path / "game.exe"
     target.touch()
     capture = tmp_path / "capture_frame1.rdc"
@@ -1453,7 +1589,7 @@ def test_capture_program_rejects_child_name_without_child_hook(tmp_path):
         )
 
 
-def test_capture_process_reuses_target_control_trigger(tmp_path, monkeypatch):
+def test_capture_process_reuses_target_control_trigger(tmp_path, monkeypatch, valid_frame_captures):
     capture = tmp_path / "capture_frame1.rdc"
     observed = {}
     monkeypatch.setattr(
@@ -1494,7 +1630,9 @@ def test_capture_process_reuses_target_control_trigger(tmp_path, monkeypatch):
     assert result["trigger_mode"] == "target_control"
 
 
-def test_capture_process_injects_triggers_and_reports_capture(tmp_path, monkeypatch):
+def test_capture_process_injects_triggers_and_reports_capture(
+    tmp_path, monkeypatch, valid_frame_captures
+):
     observed = {}
     capture = tmp_path / "capture_frame1.rdc"
 
@@ -1522,7 +1660,7 @@ def test_capture_process_injects_triggers_and_reports_capture(tmp_path, monkeypa
 
 
 def test_capture_process_triggers_while_injector_is_running_and_only_stops_injector(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, valid_frame_captures
 ):
     started = {}
     target = {"running": True}
@@ -1628,7 +1766,9 @@ def test_capture_process_readiness_timeout_force_stops_only_injector(tmp_path, m
     assert target["running"] is True
 
 
-def test_triggered_program_capture_keeps_controller_alive_until_capture(tmp_path, monkeypatch):
+def test_triggered_program_capture_keeps_controller_alive_until_capture(
+    tmp_path, monkeypatch, valid_frame_captures
+):
     target = tmp_path / "game.exe"
     target.touch()
     command = tmp_path / "renderdoccmd.exe"

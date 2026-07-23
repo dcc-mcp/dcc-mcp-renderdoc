@@ -23,3 +23,6 @@ metadata:
 Inspect before exporting. These tools never modify the input `.rdc`; exports require an explicit
 destination path and create its parent directory when needed.
 
+Inspection reports `draw_dispatch_count`, `frame_work_count`, `present_count`, and
+`frame_content_status` so a structurally readable capture with no rendering work is not mistaken
+for a usable frame.
