@@ -1684,3 +1684,10 @@ def test_triggered_program_capture_keeps_controller_alive_until_capture(tmp_path
 def test_invalid_capture_is_rejected(tmp_path: Path):
     with pytest.raises(runtime.RenderDocError, match="not .rdc"):
         runtime.inspect_capture(str(tmp_path / "missing.rdc"))
+
+
+def test_missing_runtime_can_disable_auto_download(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_CMD", str(tmp_path / "missing"))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_AUTO_DOWNLOAD", "0")
+    with pytest.raises(runtime.RenderDocError, match="does not exist"):
+        runtime.resolve_renderdoccmd()

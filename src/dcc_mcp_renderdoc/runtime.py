@@ -16,6 +16,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+from .downloader import download_latest
+
 
 class RenderDocError(RuntimeError):
     """Raised when a RenderDoc operation cannot satisfy its contract."""
@@ -120,6 +122,17 @@ def resolve_renderdoccmd(explicit: Optional[str] = None) -> Path:
         found = shutil.which(name)
         if found:
             return Path(found).resolve()
+    if os.environ.get("DCC_MCP_RENDERDOC_AUTO_DOWNLOAD", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }:
+        try:
+            return download_latest()
+        except (OSError, RuntimeError) as exc:
+            raise RenderDocError(
+                f"RenderDoc was not found and automatic download failed: {exc}"
+            ) from exc
     raise RenderDocError(
         "renderdoccmd was not found; install RenderDoc or set DCC_MCP_RENDERDOC_CMD"
     )
