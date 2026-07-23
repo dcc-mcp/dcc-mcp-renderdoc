@@ -33,9 +33,9 @@ Python unit tests only). On headless Linux, run the adapter under Xvfb or provid
 X/Wayland display; the official archive does not include Qt's `offscreen` platform plugin.
 
 Capture tools inspect each new `.rdc` before reporting success. A capture with no frame work such
-as Draw, Dispatch, Clear, Copy, Resolve, or Blit is rejected with chunk diagnostics while the
-`.rdc` remains at the requested output path; retry while the intended target is actively rendering
-or correct the selected child process.
+as Draw, Dispatch, Clear, Copy, Resolve, Blit, render-pass work, or command-list execution is
+rejected with chunk diagnostics while the `.rdc` remains at the requested output path; retry while
+the intended target is actively rendering or correct the selected child process.
 
 Use `capture_process` when Steam or another platform client must launch the target first. It
 injects into the explicit PID, connects to the returned Target Control ident, requests one capture

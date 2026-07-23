@@ -643,23 +643,72 @@ def _child_text(parent: ET.Element, name: str) -> Optional[str]:
     return child.text.strip() if child is not None and child.text else None
 
 
-def _is_draw_or_dispatch_chunk(name: str) -> bool:
+def _chunk_operation(name: str) -> str:
     if name.casefold().startswith("internal::"):
+        return ""
+    return name.rsplit("::", 1)[-1].casefold()
+
+
+def _is_draw_or_dispatch_chunk(name: str) -> bool:
+    operation = _chunk_operation(name)
+    if operation.startswith("gldrawbuffer"):
         return False
-    normalized = name.rsplit("::", 1)[-1].casefold()
-    return any(
-        marker in normalized for marker in ("draw", "dispatch", "tracerays", "executeindirect")
+    return operation.startswith(
+        (
+            "draw",
+            "dispatch",
+            "tracerays",
+            "executeindirect",
+            "vkcmddraw",
+            "vkcmddispatch",
+            "vkcmdtracerays",
+            "gldraw",
+            "glmultidraw",
+            "gldispatch",
+        )
     )
 
 
 def _is_frame_work_chunk(name: str) -> bool:
-    if name.casefold().startswith("internal::"):
-        return False
     if _is_draw_or_dispatch_chunk(name):
         return True
-    operation = name.rsplit("::", 1)[-1].casefold()
-    return operation != "clearstate" and any(
-        marker in operation for marker in ("clear", "copy", "resolve", "blit")
+    operation = _chunk_operation(name)
+    if operation.startswith("gl"):
+        clear = operation == "glclear" or operation.startswith(
+            ("glclearbuffer", "glclearnamedframebuffer", "glcleartex")
+        )
+    else:
+        clear = operation != "clearstate" and operation.startswith(("clear", "vkcmdclear"))
+    return clear or operation.startswith(
+        (
+            "copy",
+            "resolve",
+            "blit",
+            "vkcmdcopy",
+            "vkcmdresolve",
+            "vkcmdblit",
+            "glcopy",
+            "glblit",
+            "vkcmdbeginrenderpass",
+            "vkcmdbeginrendering",
+            "vkcmdexecutecommands",
+            "executecommandlist",
+        )
+    )
+
+
+def _is_present_chunk(name: str) -> bool:
+    operation = _chunk_operation(name)
+    return operation.startswith(
+        (
+            "present",
+            "vkqueuepresent",
+            "swapbuffers",
+            "glxswapbuffers",
+            "eglswapbuffers",
+            "wglswapbuffers",
+            "wglswaplayerbuffers",
+        )
     )
 
 
@@ -683,7 +732,7 @@ def parse_capture_xml(xml_file: str, *, representative_limit: int = 20) -> dict[
     counts = Counter(names)
     draw_dispatch_count = sum(_is_draw_or_dispatch_chunk(name) for name in names)
     frame_work_count = sum(_is_frame_work_chunk(name) for name in names)
-    present_count = sum("present" in name.casefold() for name in names)
+    present_count = sum(_is_present_chunk(name) for name in names)
     return {
         "driver": {
             "id": driver.get("id") if driver is not None else None,
@@ -752,9 +801,9 @@ def _validate_frame_captures(
             }
             raise RenderDocError(
                 "RenderDoc capture contains no rendering work (Draw, Dispatch, Clear, Copy, "
-                "Resolve, or Blit) and is not a usable frame capture. The .rdc was preserved; "
-                "retry while the target is actively rendering and verify the selected process "
-                "or child target. "
+                "Resolve, Blit, render-pass work, or command-list execution) and is not a usable "
+                "frame capture. The .rdc was preserved; retry while the target is actively "
+                "rendering and verify the selected process or child target. "
                 f"diagnostics={json.dumps(diagnostics, sort_keys=True)}"
             )
         validations.append(

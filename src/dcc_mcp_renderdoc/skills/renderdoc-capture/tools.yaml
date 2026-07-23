@@ -14,7 +14,7 @@ tools:
       on-success: [renderdoc_capture__capture_program]
       on-failure: [dcc_diagnostics__audit_log]
   - name: capture_program
-    description: Launch one explicit executable under RenderDoc and return newly created .rdc files only when they contain frame work such as Draw, Dispatch, Clear, Copy, Resolve, or Blit. A no-work capture is preserved and reported as a failure with chunk diagnostics. With trigger_after_secs, request the frame through official local Target Control without foreground or keyboard input. With hook_children enabled, trigger_process_name first checks the launched target, then follows only its official NewChild messages to select a unique matching child. Use for controlled game or graphics test capture. Not for shell commands or attaching to an existing process.
+    description: Launch one explicit executable under RenderDoc and return newly created .rdc files only when they contain frame work such as Draw, Dispatch, Clear, Copy, Resolve, Blit, render-pass work, or command-list execution. A no-work capture is preserved and reported as a failure with chunk diagnostics. With trigger_after_secs, request the frame through official local Target Control without foreground or keyboard input. With hook_children enabled, trigger_process_name first checks the launched target, then follows only its official NewChild messages to select a unique matching child. Use for controlled game or graphics test capture. Not for shell commands or attaching to an existing process.
     input_schema:
       type: object
       required: [executable, output_template]
@@ -46,7 +46,7 @@ tools:
       on-success: [renderdoc_analysis__inspect_capture, renderdoc_analysis__export_thumbnail]
       on-failure: [dcc_diagnostics__audit_log]
   - name: capture_process
-    description: Inject RenderDoc into one process before it creates its graphics device, request a capture through official local Target Control after a delay, and return the new .rdc file only when it contains frame work such as Draw, Dispatch, Clear, Copy, Resolve, or Blit. A no-work capture is preserved and reported as a failure with chunk diagnostics. Use when a game must be launched by its platform client. Prefer capture_program for an already initialized game; not for process termination.
+    description: Inject RenderDoc into one process before it creates its graphics device, request a capture through official local Target Control after a delay, and return the new .rdc file only when it contains frame work such as Draw, Dispatch, Clear, Copy, Resolve, Blit, render-pass work, or command-list execution. A no-work capture is preserved and reported as a failure with chunk diagnostics. Use when a game must be launched by its platform client. Prefer capture_program for an already initialized game; not for process termination.
     input_schema:
       type: object
       required: [process_id, output_template]

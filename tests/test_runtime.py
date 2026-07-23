@@ -90,6 +90,64 @@ def test_parse_capture_xml_accepts_clear_and_copy_only_frame_work(tmp_path: Path
     assert result["frame_content_status"] == "rendering_commands_present"
 
 
+def test_parse_capture_xml_rejects_opengl_state_only_frame(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="3">OpenGL</driver></header><chunks version="1">
+        <chunk name="glDrawBuffer"/><chunk name="glDrawBuffers"/>
+        <chunk name="glNamedFramebufferDrawBuffer"/>
+        <chunk name="glNamedFramebufferDrawBuffers"/>
+        <chunk name="glClearColor"/><chunk name="glClearDepth"/>
+        <chunk name="glClearStencil"/><chunk name="SwapBuffers"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 0
+    assert result["present_count"] == 1
+    assert result["frame_content_status"] == "no_rendering_work"
+
+
+def test_parse_capture_xml_accepts_vulkan_render_pass_work(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="2">Vulkan</driver></header><chunks version="1">
+        <chunk name="vkCmdBeginRenderPass"/><chunk name="vkCmdBeginRendering"/>
+        <chunk name="vkQueuePresentKHR"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 2
+    assert result["present_count"] == 1
+    assert result["frame_content_status"] == "rendering_commands_present"
+
+
+def test_parse_capture_xml_accepts_explicit_command_list_execution(tmp_path: Path):
+    xml_file = tmp_path / "capture.xml"
+    xml_file.write_text(
+        """<rdc><header><driver id="2">Vulkan</driver></header><chunks version="1">
+        <chunk name="vkCmdExecuteCommands"/>
+        <chunk name="ID3D11DeviceContext::ExecuteCommandList"/>
+        <chunk name="ID3D12CommandQueue::ExecuteCommandLists"/>
+        <chunk name="vkQueuePresentKHR"/>
+        </chunks></rdc>""",
+        encoding="utf-8",
+    )
+
+    result = runtime.parse_capture_xml(str(xml_file))
+
+    assert result["draw_dispatch_count"] == 0
+    assert result["frame_work_count"] == 3
+    assert result["present_count"] == 1
+
+
 def test_resolve_renderdoccmd_prefers_explicit_file(tmp_path: Path):
     executable = tmp_path / "renderdoccmd"
     executable.touch()
