@@ -1,6 +1,6 @@
 tools:
   - name: inspect_capture
-    description: Convert one .rdc capture to temporary XML and summarize stable header and chunk metadata. Use for offline triage. Not for GPU performance conclusions or high-level drawcall reconstruction.
+    description: Convert one .rdc capture to temporary XML and summarize stable header, chunk metadata, Draw/Dispatch count, frame-work count, Present count, and frame-content status. Use for offline triage and identifying readable but unusable no-work captures. Not for GPU performance conclusions or high-level drawcall reconstruction.
     input_schema:
       type: object
       required: [capture_file]

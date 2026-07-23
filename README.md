@@ -77,7 +77,8 @@ through the stable gateway at `http://127.0.0.1:9765/mcp`; set
 - Launch a game or test executable under RenderDoc and wait for a typed `.rdc` capture.
 - Trigger a capture through official Target Control after a configurable delay.
 - Inject into a process that had to be launched by a platform client, then trigger and collect a capture.
-- Inspect capture driver, machine identity, chunk version, API-call counts, and representative calls.
+- Reject no-work captures with actionable diagnostics while preserving the `.rdc` artifact.
+- Inspect capture driver, machine identity, chunk version, frame-work and Present counts, and representative calls.
 - Export a capture thumbnail for visual review.
 - Export Chrome trace JSON for timeline tooling.
 

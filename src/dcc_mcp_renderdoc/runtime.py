@@ -485,9 +485,11 @@ def capture_program(
             f"before creating its graphics device. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
         )
+    capture_validations = _validate_frame_captures(captures, command=command)
     return {
         "target": str(target),
         "captures": [str(path) for path in captures],
+        "capture_validations": capture_validations,
         "focused_target_window": False,
         "trigger_mode": trigger_mode,
         "stdout": stdout.strip(),
@@ -555,9 +557,11 @@ def capture_process(
             f"capture_program. {diagnostics}. "
             f"RenderDoc output: {output_detail}"
         )
+    capture_validations = _validate_frame_captures(captures, command=command)
     return {
         "process_id": process_id,
         "captures": [str(path) for path in captures],
+        "capture_validations": capture_validations,
         "focused_target_window": False,
         "trigger_mode": "target_control",
         "stdout": stdout.strip(),
@@ -639,6 +643,26 @@ def _child_text(parent: ET.Element, name: str) -> Optional[str]:
     return child.text.strip() if child is not None and child.text else None
 
 
+def _is_draw_or_dispatch_chunk(name: str) -> bool:
+    if name.casefold().startswith("internal::"):
+        return False
+    normalized = name.rsplit("::", 1)[-1].casefold()
+    return any(
+        marker in normalized for marker in ("draw", "dispatch", "tracerays", "executeindirect")
+    )
+
+
+def _is_frame_work_chunk(name: str) -> bool:
+    if name.casefold().startswith("internal::"):
+        return False
+    if _is_draw_or_dispatch_chunk(name):
+        return True
+    operation = name.rsplit("::", 1)[-1].casefold()
+    return operation != "clearstate" and any(
+        marker in operation for marker in ("clear", "copy", "resolve", "blit")
+    )
+
+
 def parse_capture_xml(xml_file: str, *, representative_limit: int = 20) -> dict[str, Any]:
     """Parse the stable high-level fields emitted by RenderDoc's XML converter."""
     path = Path(xml_file)
@@ -657,6 +681,9 @@ def parse_capture_xml(xml_file: str, *, representative_limit: int = 20) -> dict[
     thumbnail = header.find("thumbnail")
     names = [chunk.get("name") or "unnamed" for chunk in chunks.findall("chunk")]
     counts = Counter(names)
+    draw_dispatch_count = sum(_is_draw_or_dispatch_chunk(name) for name in names)
+    frame_work_count = sum(_is_frame_work_chunk(name) for name in names)
+    present_count = sum("present" in name.casefold() for name in names)
     return {
         "driver": {
             "id": driver.get("id") if driver is not None else None,
@@ -669,6 +696,12 @@ def parse_capture_xml(xml_file: str, *, representative_limit: int = 20) -> dict[
         },
         "chunk_version": chunks.get("version"),
         "chunk_count": len(names),
+        "draw_dispatch_count": draw_dispatch_count,
+        "frame_work_count": frame_work_count,
+        "present_count": present_count,
+        "frame_content_status": (
+            "rendering_commands_present" if frame_work_count else "no_rendering_work"
+        ),
         "chunk_frequencies": [
             {"name": name, "count": count} for name, count in counts.most_common(20)
         ],
@@ -700,6 +733,47 @@ def inspect_capture(
         )
         details = parse_capture_xml(str(xml_file), representative_limit=representative_limit)
     return {"capture_file": str(capture), "size_bytes": capture.stat().st_size, **details}
+
+
+def _validate_frame_captures(
+    captures: Sequence[Path], *, command: Optional[str]
+) -> list[dict[str, Any]]:
+    validations = []
+    for capture in captures:
+        details = inspect_capture(str(capture), command=command)
+        if details["frame_work_count"] == 0:
+            diagnostics = {
+                "capture_file": details["capture_file"],
+                "driver": details["driver"],
+                "chunk_count": details["chunk_count"],
+                "draw_dispatch_count": details["draw_dispatch_count"],
+                "present_count": details["present_count"],
+                "representative_chunks": details["representative_chunks"],
+            }
+            raise RenderDocError(
+                "RenderDoc capture contains no rendering work (Draw, Dispatch, Clear, Copy, "
+                "Resolve, or Blit) and is not a usable frame capture. The .rdc was preserved; "
+                "retry while the target is actively rendering and verify the selected process "
+                "or child target. "
+                f"diagnostics={json.dumps(diagnostics, sort_keys=True)}"
+            )
+        validations.append(
+            {
+                key: details[key]
+                for key in (
+                    "capture_file",
+                    "size_bytes",
+                    "driver",
+                    "thumbnail",
+                    "chunk_count",
+                    "draw_dispatch_count",
+                    "frame_work_count",
+                    "present_count",
+                    "frame_content_status",
+                )
+            }
+        )
+    return validations
 
 
 def _prepare_output(output_file: str, expected_suffixes: Iterable[str]) -> Path:
