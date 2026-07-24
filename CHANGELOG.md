@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.3...v0.4.0) (2026-07-23)
+
+
+### Features
+
+* auto-download RenderDoc runtime ([e380b95](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e380b95c9cd7f86a031e4634b39740111af507ec))
+
+
+### Bug Fixes
+
+* classify render work by API operation ([f5cf5a6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/f5cf5a69b31cd4066d47d28c6701262d3c3225ac))
+* reject captures without rendering work ([5799193](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/57991932e74c57e2826ffba10cbb3f433e55dca7))
+
 ## [0.3.3](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.2...v0.3.3) (2026-07-22)
 
 
