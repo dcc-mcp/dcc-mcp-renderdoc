@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.4.0...v0.5.0) (2026-07-29)
+
+
+### Features
+
+* export drawcall shader resources ([8ee5f7d](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/8ee5f7d36819010f79a5aef7a0ac345c6a1a2a60))
+
 ## [0.4.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.3.3...v0.4.0) (2026-07-23)
 
 
