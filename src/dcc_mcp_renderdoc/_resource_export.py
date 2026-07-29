@@ -43,14 +43,10 @@ def _export(controller, rd, event_id, output_dir):
         seen.add(resource_id)
         access_index = int(used.access.index)
         shader_resource = (
-            shader_resources[access_index]
-            if 0 <= access_index < len(shader_resources)
-            else None
+            shader_resources[access_index] if 0 <= access_index < len(shader_resources) else None
         )
         binding = (
-            int(shader_resource.fixedBindNumber)
-            if shader_resource is not None
-            else access_index
+            int(shader_resource.fixedBindNumber) if shader_resource is not None else access_index
         )
         shader_name = str(shader_resource.name) if shader_resource is not None else ""
         resource_name = resource_names.get(resource_id, "")
