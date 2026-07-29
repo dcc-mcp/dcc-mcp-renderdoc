@@ -514,6 +514,21 @@ def test_target_control_status_requires_integer_version_and_null_error():
         runtime._validate_target_control_status({**status, "error": ""})
 
 
+def test_resource_export_status_requires_exact_success_schema():
+    status = {
+        "schema_version": 1,
+        "event_id": 557,
+        "action_name": "DrawIndexed(23451)",
+        "num_indices": 23451,
+        "resources": [],
+        "error": None,
+    }
+
+    assert runtime._validate_resource_export_status(status) is status
+    with pytest.raises(runtime.RenderDocError, match="invalid status schema"):
+        runtime._validate_resource_export_status({**status, "unexpected": True})
+
+
 def test_target_control_capture_must_be_new_rdc_in_requested_directory(tmp_path):
     capture = tmp_path / "capture_frame1.rdc"
     capture.touch()

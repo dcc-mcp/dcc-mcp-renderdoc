@@ -1,9 +1,9 @@
 ---
 name: renderdoc-analysis
 description: >-
-  Domain skill — Inspect an existing RenderDoc capture and export its embedded thumbnail or Chrome
-  trace. Use for offline graphics triage and automation artifacts. Not for launching a capture —
-  use renderdoc-capture.
+  Domain skill — Inspect an existing RenderDoc capture and export its embedded thumbnail, Chrome
+  trace, or drawcall texture resources. Use for offline graphics triage and automation artifacts.
+  Not for launching a capture — use renderdoc-capture.
 license: MIT
 compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.19+"
 allowed-tools: "python"
@@ -22,6 +22,10 @@ metadata:
 
 Inspect before exporting. These tools never modify the input `.rdc`; exports require an explicit
 destination path and create its parent directory when needed.
+
+Use `export_drawcall_resources` with an exact event ID to export only texture resources that the
+pixel shader reports as used at that event. The result records binding, resource name, dimensions,
+format, and output file for each PNG.
 
 Inspection reports `draw_dispatch_count`, `frame_work_count`, `present_count`, and
 `frame_content_status` so a structurally readable capture with no rendering work is not mistaken

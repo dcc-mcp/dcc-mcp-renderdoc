@@ -194,6 +194,32 @@ def _validate_target_control_status(status: Any) -> dict[str, Any]:
     return status
 
 
+def _validate_resource_export_status(status: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "event_id",
+        "action_name",
+        "num_indices",
+        "resources",
+        "error",
+    }
+    if not isinstance(status, dict) or set(status) != fields:
+        raise RenderDocError("Resource export returned an invalid status schema")
+    if type(status["schema_version"]) is not int or status["schema_version"] != 1:
+        raise RenderDocError("Resource export returned an unsupported status version")
+    if status["error"] is not None:
+        raise RenderDocError(f"Resource export failed: {status['error']}")
+    if type(status["event_id"]) is not int or status["event_id"] <= 0:
+        raise RenderDocError("Resource export returned an invalid event ID")
+    if not isinstance(status["action_name"], str) or not status["action_name"]:
+        raise RenderDocError("Resource export returned an invalid action name")
+    if type(status["num_indices"]) is not int or status["num_indices"] < 0:
+        raise RenderDocError("Resource export returned an invalid index count")
+    if not isinstance(status["resources"], list):
+        raise RenderDocError("Resource export returned invalid resources")
+    return status
+
+
 def _configure_qrenderdoc_environment(root: Path, environment: dict[str, str]) -> None:
     if sys.platform == "linux":
         config_root = root / "xdg-data"
@@ -782,6 +808,85 @@ def inspect_capture(
         )
         details = parse_capture_xml(str(xml_file), representative_limit=representative_limit)
     return {"capture_file": str(capture), "size_bytes": capture.stat().st_size, **details}
+
+
+def export_drawcall_resources(
+    capture_file: str,
+    event_id: int,
+    output_dir: str,
+    *,
+    timeout_secs: int = 300,
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Export pixel-shader textures used by one event through qrenderdoc replay."""
+    capture = _require_capture(capture_file)
+    if type(event_id) is not int or event_id <= 0:
+        raise RenderDocError("RenderDoc event ID must be a positive integer")
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    qrenderdoc = _resolve_qrenderdoc(command)
+    script_path = Path(__file__).with_name("_resource_export.py")
+    if not script_path.is_file():
+        raise RenderDocError(f"Bundled resource export helper is missing: {script_path}")
+
+    with tempfile.TemporaryDirectory(prefix="dcc-mcp-renderdoc-resource-") as directory:
+        root = Path(directory)
+        status_path = root / "status.json"
+        stdout_path = root / "qrenderdoc.stdout.log"
+        stderr_path = root / "qrenderdoc.stderr.log"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "DCC_MCP_RENDERDOC_CAPTURE": str(capture),
+                "DCC_MCP_RENDERDOC_EVENT_ID": str(event_id),
+                "DCC_MCP_RENDERDOC_RESOURCE_OUTPUT": str(output),
+                "DCC_MCP_RENDERDOC_RESOURCE_STATUS": str(status_path),
+            }
+        )
+        _configure_qrenderdoc_environment(root, environment)
+        try:
+            with (
+                stdout_path.open("w", encoding="utf-8") as stdout,
+                stderr_path.open("w", encoding="utf-8") as stderr,
+            ):
+                result = subprocess.run(
+                    [str(qrenderdoc), "--python", str(script_path)],
+                    check=False,
+                    stdout=stdout,
+                    stderr=stderr,
+                    text=True,
+                    timeout=timeout_secs,
+                    shell=False,
+                    env=environment,
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise RenderDocError(
+                f"Resource export timed out after {timeout_secs}s: "
+                f"{_read_diagnostic_tail(stderr_path) or _read_diagnostic_tail(stdout_path)}"
+            ) from exc
+        if result.returncode != 0:
+            detail = (
+                _read_diagnostic_tail(stderr_path)
+                or _read_diagnostic_tail(stdout_path)
+                or "no host output"
+            )
+            raise RenderDocError(
+                f"Resource export host exited with code {result.returncode}: {detail}"
+            )
+        if not status_path.is_file():
+            raise RenderDocError(
+                "Resource export did not write status: "
+                f"{_read_diagnostic_tail(stderr_path) or _read_diagnostic_tail(stdout_path)}"
+            )
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RenderDocError("Resource export wrote malformed status JSON") from exc
+        return {
+            "capture_file": str(capture),
+            "output_dir": str(output),
+            **_validate_resource_export_status(status),
+        }
 
 
 def _validate_frame_captures(
