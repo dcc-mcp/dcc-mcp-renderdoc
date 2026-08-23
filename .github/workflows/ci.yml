@@ -46,11 +46,27 @@ jobs:
       - run: ruff check src tests tools
       - run: ruff format --check src tests tools
       - run: python tools/lint_skills.py
+      - name: Doctor and verify JSON contract
+        shell: bash
+        env:
+          DCC_MCP_RENDERDOC_CMD: missing-renderdoccmd
+          DCC_MCP_RENDERDOC_AUTO_DOWNLOAD: "0"
+        run: |
+          set +e
+          python -m dcc_mcp_renderdoc doctor --json > doctor.json
+          doctor_status=$?
+          python -m dcc_mcp_renderdoc verify --json > verify.json
+          verify_status=$?
+          set -e
+          test "$doctor_status" -eq 10
+          test "$verify_status" -eq 40
+          python -c 'import json; r=json.load(open("doctor.json")); assert r["schema_version"] == 1 and r["exit_code"] == 10 and not r["directly_usable"] and r["next_steps"]'
+          python -c 'import json; r=json.load(open("verify.json")); assert r["schema_version"] == 1 and r["exit_code"] == 40 and not r["directly_usable"] and r["next_steps"]'
       - run: python -m build
       - run: python -m twine check dist/*
 
-  renderdoc-latest:
-    name: Latest stable RenderDoc / real OpenGL capture smoke
+  renderdoc-pinned:
+    name: Pinned RenderDoc / real OpenGL capture smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -58,6 +74,7 @@ jobs:
       DCC_MCP_DISABLE_FILE_LOGGING: "1"
       DCC_MCP_DISABLE_JOB_PERSISTENCE: "1"
       DCC_MCP_DISABLE_TELEMETRY: "1"
+      DCC_MCP_RUNTIME_CACHE: ${{ github.workspace }}/.renderdoc-bin
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -67,7 +84,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1 libgl1-mesa-dev libproxy1v5 libx11-dev xvfb
       - id: renderdoc
         shell: bash
-        run: echo "path=$(python tools/download_latest_renderdoc.py --output .renderdoc-bin)" >> "$GITHUB_OUTPUT"
+        run: echo "path=$(python -c 'from dcc_mcp_renderdoc.downloader import download_pinned; print(download_pinned())')" >> "$GITHUB_OUTPUT"
       - name: Verify qrenderdoc runtime dependencies
         shell: bash
         run: |

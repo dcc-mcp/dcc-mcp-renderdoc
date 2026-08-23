@@ -59,6 +59,9 @@ conversion. Delayed capture uses RenderDoc's official Target Control API through
 pip install dcc-mcp-renderdoc
 ```
 
+See the complete [Install SOP](install.md) for supported versions, JSON doctor/verify, upgrades,
+cache integrity, uninstall, and troubleshooting.
+
 Install RenderDoc separately, then expose its command line tool with either `PATH` or:
 
 ```bash
@@ -67,6 +70,13 @@ dcc-mcp-renderdoc
 ```
 
 On Windows, set the variable to `renderdoccmd.exe`.
+
+Before starting the adapter, verify the full runtime contract:
+
+```bash
+dcc-mcp-renderdoc doctor --json
+dcc-mcp-renderdoc verify --json
+```
 
 Each adapter instance uses an OS-assigned MCP port and registers it for CLI discovery. Connect
 through the stable gateway at `http://127.0.0.1:9765/mcp`; set
@@ -102,10 +112,11 @@ attached.
 
 ## Real CI
 
-CI discovers the current stable Linux RenderDoc build from the official downloads page. It
-compiles a small OpenGL program, requests a real frame through Target Control under Xvfb using
-Qt's bundled `xcb` platform, asserts the structured trigger mode, calls the MCP analysis tool
-against the resulting `.rdc`, and verifies thumbnail and timeline exports.
+CI downloads only the repository-pinned Linux RenderDoc archive and verifies its SHA-256 before
+extraction. It compiles a small OpenGL program, requests a real frame through Target Control under
+Xvfb using Qt's bundled `xcb` platform, asserts the structured trigger mode, calls the MCP analysis
+tool against the resulting `.rdc`, and verifies thumbnail and timeline exports. CI also exercises
+the JSON doctor/verify contract and stable failure exits without downloading a runtime.
 
 ## Development
 
