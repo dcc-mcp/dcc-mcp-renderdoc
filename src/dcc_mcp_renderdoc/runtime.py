@@ -16,7 +16,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from .downloader import download_latest
+from .downloader import download_pinned
 
 
 class RenderDocError(RuntimeError):
@@ -128,7 +128,7 @@ def resolve_renderdoccmd(explicit: Optional[str] = None) -> Path:
         "no",
     }:
         try:
-            return download_latest()
+            return download_pinned()
         except (OSError, RuntimeError) as exc:
             raise RenderDocError(
                 f"RenderDoc was not found and automatic download failed: {exc}"
