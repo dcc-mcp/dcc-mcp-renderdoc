@@ -71,12 +71,18 @@ dcc-mcp-renderdoc
 
 On Windows, set the variable to `renderdoccmd.exe`.
 
-Before starting the adapter, verify the full runtime contract:
+Plan and execute the standard lifecycle before starting the adapter:
 
 ```bash
+dcc-mcp-renderdoc install --json
+dcc-mcp-renderdoc install --json --yes
+dcc-mcp-renderdoc status --json
 dcc-mcp-renderdoc doctor --json
 dcc-mcp-renderdoc verify --json
 ```
+
+`doctor` is a compatibility preflight. `install`, `status`, `verify`, `uninstall`, and `upgrade`
+use the receipt-backed Install SOP v1 contract; mutating verbs plan unless `--yes` is supplied.
 
 Each adapter instance uses an OS-assigned MCP port and registers it for CLI discovery. Connect
 through the stable gateway at `http://127.0.0.1:9765/mcp`; set
@@ -115,8 +121,9 @@ attached.
 CI downloads only the repository-pinned Linux RenderDoc archive and verifies its SHA-256 before
 extraction. It compiles a small OpenGL program, requests a real frame through Target Control under
 Xvfb using Qt's bundled `xcb` platform, asserts the structured trigger mode, calls the MCP analysis
-tool against the resulting `.rdc`, and verifies thumbnail and timeline exports. CI also exercises
-the JSON doctor/verify contract and stable failure exits without downloading a runtime.
+tool against the resulting `.rdc`, and verifies thumbnail and timeline exports. CI also validates
+all standard lifecycle receipts against the Install SOP v1 JSON schema, proves stable failure exits
+without downloading, and exercises install/status/verify/uninstall around the real pinned runtime.
 
 ## Development
 

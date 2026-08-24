@@ -46,22 +46,34 @@ jobs:
       - run: ruff check src tests tools
       - run: ruff format --check src tests tools
       - run: python tools/lint_skills.py
-      - name: Doctor and verify JSON contract
+      - name: Install SOP JSON contract
         shell: bash
         env:
           DCC_MCP_RENDERDOC_CMD: missing-renderdoccmd
           DCC_MCP_RENDERDOC_AUTO_DOWNLOAD: "0"
         run: |
+          receipt="$RUNNER_TEMP/renderdoc-receipt.json"
           set +e
           python -m dcc_mcp_renderdoc doctor --json > doctor.json
           doctor_status=$?
-          python -m dcc_mcp_renderdoc verify --json > verify.json
+          DCC_MCP_RENDERDOC_AUTO_DOWNLOAD=1 python -m dcc_mcp_renderdoc install --json --dry-run --receipt-path "$receipt" > install.json
+          install_status=$?
+          python -m dcc_mcp_renderdoc status --json --receipt-path "$receipt" > status.json
+          status_status=$?
+          python -m dcc_mcp_renderdoc verify --json --receipt-path "$receipt" > verify.json
           verify_status=$?
+          python -m dcc_mcp_renderdoc uninstall --json --yes --receipt-path "$receipt" > uninstall.json
+          uninstall_status=$?
+          python -m dcc_mcp_renderdoc upgrade --json --yes --receipt-path "$receipt" > upgrade.json
+          upgrade_status=$?
           set -e
           test "$doctor_status" -eq 10
+          test "$install_status" -eq 0
+          test "$status_status" -eq 0
           test "$verify_status" -eq 40
-          python -c 'import json; r=json.load(open("doctor.json")); assert r["schema_version"] == 1 and r["exit_code"] == 10 and not r["directly_usable"] and r["next_steps"]'
-          python -c 'import json; r=json.load(open("verify.json")); assert r["schema_version"] == 1 and r["exit_code"] == 40 and not r["directly_usable"] and r["next_steps"]'
+          test "$uninstall_status" -eq 0
+          test "$upgrade_status" -eq 10
+          python -c 'import json; from jsonschema import Draft202012Validator; from dcc_mcp_renderdoc.install_contract import load_install_sop_schema; v=Draft202012Validator(load_install_sop_schema()); [v.validate(json.load(open(p))) for p in ("doctor.json","install.json","status.json","verify.json","uninstall.json","upgrade.json")]'
       - run: python -m build
       - run: python -m twine check dist/*
 
@@ -75,6 +87,7 @@ jobs:
       DCC_MCP_DISABLE_JOB_PERSISTENCE: "1"
       DCC_MCP_DISABLE_TELEMETRY: "1"
       DCC_MCP_RUNTIME_CACHE: ${{ github.workspace }}/.renderdoc-bin
+      DCC_MCP_RENDERDOC_RECEIPT: ${{ github.workspace }}/.renderdoc-receipt.json
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -85,6 +98,13 @@ jobs:
       - id: renderdoc
         shell: bash
         run: echo "path=$(python -c 'from dcc_mcp_renderdoc.downloader import download_pinned; print(download_pinned())')" >> "$GITHUB_OUTPUT"
+      - name: Install, status, and verify managed runtime
+        shell: bash
+        run: |
+          python -m dcc_mcp_renderdoc install --python "$(command -v python)" --json --yes > install.json
+          python -m dcc_mcp_renderdoc status --python "$(command -v python)" --json > status.json
+          python -m dcc_mcp_renderdoc verify --python "$(command -v python)" --json > verify.json
+          python -c 'import json; from jsonschema import Draft202012Validator; from dcc_mcp_renderdoc.install_contract import load_install_sop_schema; v=Draft202012Validator(load_install_sop_schema()); [v.validate(json.load(open(p))) for p in ("install.json","status.json","verify.json")]'
       - name: Verify qrenderdoc runtime dependencies
         shell: bash
         run: |
@@ -104,6 +124,13 @@ jobs:
         env:
           QT_QPA_PLATFORM: xcb
         run: xvfb-run -a python tests/live_renderdoc_smoke.py --renderdoc "${{ steps.renderdoc.outputs.path }}" --program tests/renderdoc_smoke
+      - name: Receipt-driven uninstall and idempotence
+        shell: bash
+        run: |
+          python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --dry-run > uninstall-plan.json
+          python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --yes > uninstall.json
+          python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --yes > uninstall-again.json
+          python -c 'import json; from jsonschema import Draft202012Validator; from dcc_mcp_renderdoc.install_contract import load_install_sop_schema; v=Draft202012Validator(load_install_sop_schema()); [v.validate(json.load(open(p))) for p in ("uninstall-plan.json","uninstall.json","uninstall-again.json")]'
       - uses: actions/upload-artifact@v6
         if: always()
         with:
