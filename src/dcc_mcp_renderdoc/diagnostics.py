@@ -6,13 +6,12 @@ import importlib.metadata
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from .__version__ import __version__
-from .downloader import PINNED_VERSION, _configured_bundle
+from .downloader import PINNED_VERSION, _configured_bundle, probe_runtime
 
 MIN_CORE_VERSION = "0.19.45"
 MIN_RENDERDOC_VERSION = "1.20"
@@ -46,29 +45,6 @@ def _find_command(explicit: Optional[str]) -> tuple[Optional[Path], Optional[str
     return None, None
 
 
-def _renderdoc_version(command: Optional[Path]) -> tuple[Optional[str], Optional[str]]:
-    if command is None:
-        return None, None
-    try:
-        result = subprocess.run(
-            [str(command), "version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, type(exc).__name__
-    output = "\n".join(
-        part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
-    )
-    if result.returncode != 0:
-        return None, f"exit_{result.returncode}"
-    parsed = _version_tuple(output)
-    return (".".join(str(part) for part in parsed), None) if parsed else (None, "unparseable")
-
-
 def _core_version() -> Optional[str]:
     try:
         return importlib.metadata.version("dcc-mcp-core")
@@ -86,12 +62,14 @@ def _next_step(
     *,
     url: Optional[str] = None,
     command: Optional[list[str]] = None,
+    why: Optional[str] = None,
 ) -> dict[str, Any]:
     return {
-        "name": name,
+        "id": name,
         "description": description,
+        "why": why or "The reported prerequisite is required before RenderDoc is usable.",
         "url": url,
-        "command": command,
+        "command": command or ["dcc-mcp-renderdoc", "install", "--json"],
         "requires_live_instance": False,
     }
 
@@ -102,21 +80,33 @@ def build_report(operation: str, *, command: Optional[str] = None) -> dict[str, 
         raise ValueError("operation must be doctor or verify")
 
     executable, command_source = _find_command(command)
-    renderdoc_version, version_error = _renderdoc_version(executable)
+    runtime_probe: Optional[dict[str, str]] = None
+    version_error: Optional[str] = None
+    if executable is not None:
+        try:
+            runtime_probe = probe_runtime(executable)
+        except RuntimeError:
+            version_error = "runtime_probe_failed"
+    renderdoc_version = runtime_probe.get("renderdoccmd_version") if runtime_probe else None
     core_version = _core_version()
     core_ok = _meets_floor(core_version, MIN_CORE_VERSION)
     renderdoc_ok = _meets_floor(renderdoc_version, MIN_RENDERDOC_VERSION)
     platform_ok = sys.platform == "win32" or sys.platform.startswith("linux")
 
-    qrenderdoc_name = "qrenderdoc.exe" if sys.platform == "win32" else "qrenderdoc"
+    qrenderdoc_name = (
+        "qrenderdoc.exe"
+        if executable is not None and executable.name.casefold().endswith(".exe")
+        else "qrenderdoc"
+    )
     qrenderdoc = executable.with_name(qrenderdoc_name) if executable is not None else None
-    qrenderdoc_ok = qrenderdoc is not None and qrenderdoc.is_file()
+    qrenderdoc_ok = qrenderdoc is not None and qrenderdoc.is_file() and runtime_probe is not None
     display_configured = sys.platform == "win32" or (
         sys.platform.startswith("linux")
         and bool(
             os.environ.get("DISPLAY")
             or os.environ.get("WAYLAND_DISPLAY")
             or os.environ.get("QT_QPA_PLATFORM")
+            or shutil.which("xvfb-run")
         )
     )
 
@@ -238,9 +228,25 @@ def build_report(operation: str, *, command: Optional[str] = None) -> dict[str, 
     operator_pin_configured = all(os.environ.get(name) for name in pin_names)
     return {
         "schema_version": 1,
+        "dcc_type": "renderdoc",
+        "adapter_version": __version__,
+        "core_version": core_version or "unknown",
+        "steps": [
+            {
+                "id": item["id"],
+                "status": "ok" if item["ok"] else "failed",
+            }
+            for item in prerequisites
+        ],
+        "receipt_path": None,
+        "verify": {
+            "directly_usable": directly_usable,
+            "failure_stage": None if directly_usable else "preflight",
+            "failure_reason": None if directly_usable else "prerequisite_failed",
+        },
         "adapter": "renderdoc",
         "operation": operation,
-        "status": "ok" if directly_usable else f"{operation}_failed",
+        "status": "ok" if directly_usable else "failed",
         "directly_usable": directly_usable,
         "exit_code": exit_code,
         "versions": {
@@ -269,6 +275,7 @@ def build_report(operation: str, *, command: Optional[str] = None) -> dict[str, 
             ),
             "api_endpoint": "http://127.0.0.1:9765/mcp",
             "authentication": "not_required_for_loopback",
+            "runtime_probe": runtime_probe,
         },
         "prerequisites": prerequisites,
         "next_steps": next_steps,

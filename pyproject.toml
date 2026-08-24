@@ -30,7 +30,7 @@ Issues = "https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues"
 Installation = "https://raw.githubusercontent.com/dcc-mcp/dcc-mcp-renderdoc/main/install.md"
 
 [project.optional-dependencies]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.8", "twine>=6"]
+dev = ["build>=1.2", "jsonschema>=4.23,<5", "pytest>=8", "ruff>=0.8", "twine>=6"]
 
 [project.scripts]
 dcc-mcp-renderdoc = "dcc_mcp_renderdoc.cli:main"

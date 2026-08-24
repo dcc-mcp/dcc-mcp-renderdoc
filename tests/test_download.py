@@ -1,12 +1,28 @@
+from __future__ import annotations
+
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from dcc_mcp_renderdoc import downloader as runtime_downloader
+
+
+class _Response(io.BytesIO):
+    def __init__(self, payload: bytes, *, url: str, content_length: int | None = None):
+        super().__init__(payload)
+        self._url = url
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+
+    def geturl(self) -> str:
+        return self._url
 
 
 def test_archive_member_must_remain_below_destination(tmp_path: Path):
@@ -58,13 +74,121 @@ def test_runtime_downloader_requires_complete_pin_before_network(monkeypatch, tm
         runtime_downloader.download_pinned()
 
 
+def test_runtime_downloader_rejects_redirect_to_another_origin(monkeypatch, tmp_path):
+    payload = b"archive"
+    monkeypatch.setenv("DCC_MCP_RUNTIME_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_VERSION", "1.45")
+    monkeypatch.setenv(
+        "DCC_MCP_RENDERDOC_URL",
+        "https://renderdoc.org/stable/1.45/renderdoc_1.45.tar.gz",
+    )
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "linux")
+    monkeypatch.setattr(
+        runtime_downloader.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            payload,
+            url="https://downloads.example/renderdoc_1.45.tar.gz",
+            content_length=len(payload),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="final download origin"):
+        runtime_downloader.download_pinned()
+
+    assert list((tmp_path / "cache").rglob("*")) == []
+
+
+def test_runtime_downloader_rejects_oversized_content_length(monkeypatch, tmp_path):
+    monkeypatch.setenv("DCC_MCP_RUNTIME_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_VERSION", "1.45")
+    url = "https://renderdoc.org/stable/1.45/renderdoc_1.45.tar.gz"
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_URL", url)
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_SHA256", "0" * 64)
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "linux")
+    monkeypatch.setattr(
+        runtime_downloader.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(
+            b"",
+            url=url,
+            content_length=runtime_downloader.MAX_DOWNLOAD_BYTES + 1,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Content-Length exceeds"):
+        runtime_downloader.download_pinned()
+
+    assert list((tmp_path / "cache").rglob("*")) == []
+
+
+def test_runtime_downloader_enforces_stream_limit_without_content_length(monkeypatch, tmp_path):
+    payload = b"12345"
+    url = "https://renderdoc.org/stable/1.45/renderdoc_1.45.tar.gz"
+    monkeypatch.setenv("DCC_MCP_RUNTIME_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_VERSION", "1.45")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_URL", url)
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_downloader, "MAX_DOWNLOAD_BYTES", 4)
+    monkeypatch.setattr(
+        runtime_downloader.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(payload, url=url),
+    )
+
+    with pytest.raises(RuntimeError, match="bounded byte limit"):
+        runtime_downloader.download_pinned()
+
+    assert list((tmp_path / "cache").rglob("*")) == []
+
+
+def test_zip_extraction_rejects_too_many_members(monkeypatch, tmp_path):
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("one", b"1")
+        bundle.writestr("two", b"2")
+    monkeypatch.setattr(runtime_downloader, "MAX_ARCHIVE_MEMBERS", 1)
+
+    with pytest.raises(RuntimeError, match="member count"):
+        runtime_downloader._extract(archive, tmp_path / "out")
+
+
+def test_zip_extraction_rejects_oversized_member(monkeypatch, tmp_path):
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("huge", b"12345")
+    monkeypatch.setattr(runtime_downloader, "MAX_MEMBER_BYTES", 4)
+
+    with pytest.raises(RuntimeError, match="member size"):
+        runtime_downloader._extract(archive, tmp_path / "out")
+
+
+def test_zip_extraction_rejects_oversized_total(monkeypatch, tmp_path):
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("one", b"123")
+        bundle.writestr("two", b"456")
+    monkeypatch.setattr(runtime_downloader, "MAX_EXTRACTED_BYTES", 5)
+
+    with pytest.raises(RuntimeError, match="expanded size"):
+        runtime_downloader._extract(archive, tmp_path / "out")
+
+
 def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, tmp_path):
+    command_bytes = b"\x7fELFrenderdoc"
+    qrenderdoc_bytes = b"\x7fELFqrenderdoc"
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w:gz") as bundle:
         command = tarfile.TarInfo("renderdoc_1.45/bin/renderdoccmd")
         command.mode = 0o755
-        command.size = len(b"renderdoc")
-        bundle.addfile(command, io.BytesIO(b"renderdoc"))
+        command.size = len(command_bytes)
+        bundle.addfile(command, io.BytesIO(command_bytes))
+        qrenderdoc = tarfile.TarInfo("renderdoc_1.45/bin/qrenderdoc")
+        qrenderdoc.mode = 0o755
+        qrenderdoc.size = len(qrenderdoc_bytes)
+        bundle.addfile(qrenderdoc, io.BytesIO(qrenderdoc_bytes))
     archive = payload.getvalue()
     checksum = hashlib.sha256(archive).hexdigest()
     cache = tmp_path / "cache"
@@ -98,14 +222,32 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         "urlopen",
         lambda *_args, **_kwargs: io.BytesIO(archive),
     )
+    monkeypatch.setattr(
+        runtime_downloader.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            "qrenderdoc v1.45" if "qrenderdoc" in str(args[0]) else "renderdoccmd v1.45",
+            "",
+        ),
+    )
 
     installed = runtime_downloader.download_pinned()
     receipt = json.loads((installed.parents[2] / ".dcc-mcp-renderdoc.json").read_text())
 
-    assert installed.read_bytes() == b"renderdoc"
+    assert installed.read_bytes() == command_bytes
     assert receipt["sha256"] == checksum
-    assert old_managed.exists() is False
+    assert receipt["files"] == {
+        "renderdoc_1.45/bin/qrenderdoc": hashlib.sha256(qrenderdoc_bytes).hexdigest(),
+        "renderdoc_1.45/bin/renderdoccmd": hashlib.sha256(command_bytes).hexdigest(),
+    }
+    assert receipt["qrenderdoc"] == "renderdoc_1.45/bin/qrenderdoc"
+    assert old_managed.is_dir()
     assert unmanaged.is_dir()
+
+    runtime_downloader._cleanup_superseded(root, installed.parents[2])
+    assert old_managed.exists() is False
 
     monkeypatch.setattr(
         runtime_downloader.urllib.request,
@@ -113,3 +255,76 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         lambda *_args, **_kwargs: pytest.fail("verified cache should be reused"),
     )
     assert runtime_downloader.download_pinned() == installed
+
+    installed.write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="integrity receipt"):
+        runtime_downloader.download_pinned()
+
+
+def test_failed_qrenderdoc_probe_preserves_prior_managed_version(monkeypatch, tmp_path):
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as bundle:
+        for relative in ("renderdoc_1.45/bin/renderdoccmd", "renderdoc_1.45/bin/qrenderdoc"):
+            member = tarfile.TarInfo(relative)
+            member.mode = 0o755
+            member.size = len(b"\x7fELF")
+            bundle.addfile(member, io.BytesIO(b"\x7fELF"))
+    archive = payload.getvalue()
+    checksum = hashlib.sha256(archive).hexdigest()
+    cache = tmp_path / "cache"
+    root = cache / "renderdoc"
+    old_checksum = "1" * 64
+    old_managed = root / f"1.44-{old_checksum[:12]}"
+    old_managed.mkdir(parents=True)
+    (old_managed / ".dcc-mcp-renderdoc.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "1.44",
+                "sha256": old_checksum,
+            }
+        ),
+        encoding="utf-8",
+    )
+    url = "https://renderdoc.org/stable/1.45/renderdoc_1.45.tar.gz"
+    monkeypatch.setenv("DCC_MCP_RUNTIME_CACHE", str(cache))
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_VERSION", "1.45")
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_URL", url)
+    monkeypatch.setenv("DCC_MCP_RENDERDOC_SHA256", checksum)
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "linux")
+    monkeypatch.setattr(
+        runtime_downloader.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(archive, url=url, content_length=len(archive)),
+    )
+    monkeypatch.setattr(
+        runtime_downloader.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args,
+            1 if Path(args[0]).name == "qrenderdoc" else 0,
+            "renderdoccmd v1.45",
+            "qrenderdoc failed",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="qrenderdoc.*probe"):
+        runtime_downloader.download_pinned()
+
+    assert old_managed.is_dir()
+    assert not (root / f"1.45-{checksum[:12]}").exists()
+
+
+def test_runtime_probe_rejects_version_echo_scripts_before_execution(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd"
+    qrenderdoc = tmp_path / "qrenderdoc"
+    command.write_text("#!/bin/sh\necho renderdoccmd v1.45\n", encoding="utf-8")
+    qrenderdoc.write_text("#!/bin/sh\necho qrenderdoc v1.45\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runtime_downloader.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("non-native placeholders must not execute"),
+    )
+
+    with pytest.raises(RuntimeError, match="not a native ELF binary"):
+        runtime_downloader.probe_runtime(command)
