@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 
@@ -46,7 +47,7 @@ def test_current_target_python_probe_reuses_proven_import_context(monkeypatch):
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
         "version",
-        lambda name: "0.5.0" if name == "dcc-mcp-renderdoc" else "0.20.0",
+        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.0",
     )
     monkeypatch.setattr(
         lifecycle.subprocess,
@@ -62,6 +63,97 @@ def test_current_target_python_probe_reuses_proven_import_context(monkeypatch):
     assert result["core_version"] == "0.20.0"
     assert result["resolution_source"] == "argument"
     assert imported == ["dcc_mcp_renderdoc", "dcc_mcp_core"]
+
+
+@pytest.mark.parametrize("adapter_version", [None, "0.0.1"])
+def test_cross_target_python_rejects_missing_or_mismatched_adapter(
+    monkeypatch, tmp_path, adapter_version
+):
+    from dcc_mcp_renderdoc import lifecycle
+
+    python = tmp_path / "target-python.exe"
+    python.touch()
+    payload = {
+        "python": str(python),
+        "python_version": "3.12.0",
+        "core_version": "0.20.0",
+    }
+    if adapter_version is not None:
+        payload["adapter_version"] = adapter_version
+    monkeypatch.setattr(
+        lifecycle.subprocess,
+        "run",
+        lambda *args, **_kwargs: lifecycle.subprocess.CompletedProcess(
+            args, 0, json.dumps(payload), ""
+        ),
+    )
+
+    with pytest.raises(lifecycle.LifecycleError) as caught:
+        lifecycle._probe_python(python)
+
+    assert caught.value.exit_code == 10
+    assert caught.value.reason == "adapter_version_mismatch"
+
+
+def test_cross_target_python_accepts_exact_adapter(monkeypatch, tmp_path):
+    from dcc_mcp_renderdoc import lifecycle
+
+    python = tmp_path / "target-python.exe"
+    python.touch()
+    payload = {
+        "python": str(python),
+        "python_version": "3.12.0",
+        "adapter_version": lifecycle.__version__,
+        "core_version": "0.20.0",
+    }
+    monkeypatch.setattr(
+        lifecycle.subprocess,
+        "run",
+        lambda *args, **_kwargs: lifecycle.subprocess.CompletedProcess(
+            args, 0, json.dumps(payload), ""
+        ),
+    )
+
+    result = lifecycle._probe_python(python)
+
+    assert result["adapter_version"] == lifecycle.__version__
+    assert result["resolution_source"] == "argument"
+
+
+def test_current_target_python_rejects_metadata_version_mismatch(monkeypatch):
+    from dcc_mcp_renderdoc import lifecycle
+
+    monkeypatch.setattr(lifecycle.importlib, "import_module", lambda _name: None)
+    monkeypatch.setattr(
+        lifecycle.importlib.metadata,
+        "version",
+        lambda name: "0.0.1" if name == "dcc-mcp-renderdoc" else "0.20.0",
+    )
+
+    with pytest.raises(lifecycle.LifecycleError) as caught:
+        lifecycle._probe_python(Path(sys.executable))
+
+    assert caught.value.exit_code == 10
+    assert caught.value.reason == "adapter_version_mismatch"
+
+
+def test_cross_target_python_timeout_is_stable_install_json(monkeypatch, capsys, tmp_path):
+    from dcc_mcp_renderdoc import cli, lifecycle
+
+    python = tmp_path / "target-python.exe"
+    python.touch()
+
+    def timeout(*_args, **_kwargs):
+        raise lifecycle.subprocess.TimeoutExpired([str(python)], 20)
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", timeout)
+
+    exit_code = cli.run(["install", "--python", str(python), "--json", "--dry-run"])
+    report = json.loads(capsys.readouterr().out)
+
+    _validate_install_result(report)
+    assert exit_code == 10
+    assert report["verify"]["failure_reason"] == "python_probe_failed"
 
 
 def test_doctor_json_reports_preflight_with_stable_exit(

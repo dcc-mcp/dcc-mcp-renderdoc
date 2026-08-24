@@ -186,9 +186,21 @@ def _probe_python(value: Optional[Path]) -> dict[str, str]:
                 "python_probe_invalid",
                 "The selected target interpreter returned invalid probe data.",
             ) from exc
-    if not isinstance(result, dict) or not _meets_floor(
-        str(result.get("core_version") or ""), MIN_CORE_VERSION
-    ):
+    if not isinstance(result, dict):
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "preflight",
+            "python_probe_invalid",
+            "The selected target interpreter returned invalid probe data.",
+        )
+    if result.get("adapter_version") != __version__:
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "preflight",
+            "adapter_version_mismatch",
+            "The target interpreter must import this exact dcc-mcp-renderdoc version.",
+        )
+    if not _meets_floor(str(result.get("core_version") or ""), MIN_CORE_VERSION):
         raise LifecycleError(
             INSTALL_EXIT_PREFLIGHT,
             "preflight",
