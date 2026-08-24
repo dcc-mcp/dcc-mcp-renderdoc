@@ -380,6 +380,7 @@ def test_target_control_trigger_uses_bundled_qrenderdoc_status(monkeypatch, tmp_
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TARGET_TIMEOUT_SECS"] == "30"
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TRIGGER_AFTER_SECS"] == "4"
     assert observed["kwargs"]["env"]["DCC_MCP_RENDERDOC_TARGET_NAME"] == "child.exe"
+    assert observed["kwargs"]["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert observed["config"] == {
         "Analytics_TotalOptOut": True,
         "rdocConfigData": 1,

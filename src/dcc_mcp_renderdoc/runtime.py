@@ -221,6 +221,9 @@ def _validate_resource_export_status(status: Any) -> dict[str, Any]:
 
 
 def _configure_qrenderdoc_environment(root: Path, environment: dict[str, str]) -> None:
+    # Keep the verified managed installation immutable while qrenderdoc's
+    # embedded Python runs our helpers.
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if sys.platform == "linux":
         config_root = root / "xdg-data"
         environment["XDG_DATA_HOME"] = str(config_root)
