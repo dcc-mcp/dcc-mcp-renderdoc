@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -21,6 +22,18 @@ def _select_linux_managed_bundle(monkeypatch, lifecycle):
     monkeypatch.setattr(lifecycle.sys, "platform", "linux")
 
 
+class _FakeDistribution:
+    def __init__(self, root: Path, version: str) -> None:
+        self.root = root
+        self.version = version
+
+    def locate_file(self, relative: str) -> Path:
+        return self.root / relative
+
+    def read_text(self, _name: str):
+        return None
+
+
 def test_compatibility_schema_matches_core_2320_canonical_contract():
     from dcc_mcp_renderdoc.install_contract import load_install_sop_schema
 
@@ -35,19 +48,34 @@ def test_compatibility_schema_matches_core_2320_canonical_contract():
     )
 
 
-def test_current_target_python_probe_reuses_proven_import_context(monkeypatch):
+def test_current_target_python_probe_reuses_proven_import_context(monkeypatch, tmp_path):
     from dcc_mcp_renderdoc import lifecycle
 
     imported = []
+    distribution_root = tmp_path / "site-packages"
+    module_origin = distribution_root / "dcc_mcp_renderdoc/__init__.py"
+    module_origin.parent.mkdir(parents=True)
+    module_origin.touch()
+    adapter_module = SimpleNamespace(__version__=lifecycle.__version__, __file__=str(module_origin))
+
+    def import_module(name):
+        imported.append(name)
+        return adapter_module if name == "dcc_mcp_renderdoc" else SimpleNamespace()
+
     monkeypatch.setattr(
         lifecycle.importlib,
         "import_module",
-        lambda name: imported.append(name),
+        import_module,
     )
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
         "version",
         lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.0",
+    )
+    monkeypatch.setattr(
+        lifecycle.importlib.metadata,
+        "distribution",
+        lambda _name: _FakeDistribution(distribution_root, lifecycle.__version__),
     )
     monkeypatch.setattr(
         lifecycle.subprocess,
@@ -77,6 +105,10 @@ def test_cross_target_python_rejects_missing_or_mismatched_adapter(
         "python": str(python),
         "python_version": "3.12.0",
         "core_version": "0.20.0",
+        "adapter_module_version": "0.0.1",
+        "adapter_module_origin": str(tmp_path / "shadow/dcc_mcp_renderdoc/__init__.py"),
+        "adapter_distribution_root": str(tmp_path / "site-packages"),
+        "adapter_direct_url": None,
     }
     if adapter_version is not None:
         payload["adapter_version"] = adapter_version
@@ -100,10 +132,19 @@ def test_cross_target_python_accepts_exact_adapter(monkeypatch, tmp_path):
 
     python = tmp_path / "target-python.exe"
     python.touch()
+    distribution_root = tmp_path / "site-packages"
+    module_origin = distribution_root / "dcc_mcp_renderdoc/__init__.py"
+    module_origin.parent.mkdir(parents=True)
+    module_origin.touch()
     payload = {
         "python": str(python),
         "python_version": "3.12.0",
         "adapter_version": lifecycle.__version__,
+        "adapter_distribution_version": lifecycle.__version__,
+        "adapter_module_version": lifecycle.__version__,
+        "adapter_module_origin": str(module_origin),
+        "adapter_distribution_root": str(distribution_root),
+        "adapter_direct_url": None,
         "core_version": "0.20.0",
     }
     monkeypatch.setattr(
@@ -118,23 +159,100 @@ def test_cross_target_python_accepts_exact_adapter(monkeypatch, tmp_path):
 
     assert result["adapter_version"] == lifecycle.__version__
     assert result["resolution_source"] == "argument"
+    assert not lifecycle._INTERNAL_PYTHON_PROBE_FIELDS.intersection(result)
 
 
-def test_current_target_python_rejects_metadata_version_mismatch(monkeypatch):
+@pytest.mark.parametrize("invalid_kind", ["module_version", "shadow_origin"])
+def test_cross_target_python_rejects_shadow_or_module_mismatch(monkeypatch, tmp_path, invalid_kind):
     from dcc_mcp_renderdoc import lifecycle
 
-    monkeypatch.setattr(lifecycle.importlib, "import_module", lambda _name: None)
+    python = tmp_path / "target-python.exe"
+    python.touch()
+    distribution_root = tmp_path / "site-packages"
+    valid_origin = distribution_root / "dcc_mcp_renderdoc/__init__.py"
+    valid_origin.parent.mkdir(parents=True)
+    valid_origin.touch()
+    payload = {
+        "python": str(python),
+        "python_version": "3.12.0",
+        "adapter_version": lifecycle.__version__,
+        "adapter_distribution_version": lifecycle.__version__,
+        "adapter_module_version": (
+            "0.0.1" if invalid_kind == "module_version" else lifecycle.__version__
+        ),
+        "adapter_module_origin": str(
+            tmp_path / "shadow/dcc_mcp_renderdoc/__init__.py"
+            if invalid_kind == "shadow_origin"
+            else valid_origin
+        ),
+        "adapter_distribution_root": str(distribution_root),
+        "adapter_direct_url": None,
+        "core_version": "0.20.0",
+    }
+    monkeypatch.setattr(
+        lifecycle.subprocess,
+        "run",
+        lambda *args, **_kwargs: lifecycle.subprocess.CompletedProcess(
+            args, 0, json.dumps(payload), ""
+        ),
+    )
+
+    with pytest.raises(lifecycle.LifecycleError) as caught:
+        lifecycle._probe_python(python)
+
+    assert caught.value.exit_code == 10
+    expected = (
+        "adapter_module_version_mismatch"
+        if invalid_kind == "module_version"
+        else "adapter_origin_mismatch"
+    )
+    assert caught.value.reason == expected
+
+
+@pytest.mark.parametrize("invalid_kind", ["module_version", "shadow_origin"])
+def test_current_target_python_rejects_shadow_or_module_mismatch(
+    monkeypatch, tmp_path, invalid_kind
+):
+    from dcc_mcp_renderdoc import lifecycle
+
+    distribution_root = tmp_path / "site-packages"
+    valid_origin = distribution_root / "dcc_mcp_renderdoc/__init__.py"
+    valid_origin.parent.mkdir(parents=True)
+    valid_origin.touch()
+    adapter_module = SimpleNamespace(
+        __version__=("0.0.1" if invalid_kind == "module_version" else lifecycle.__version__),
+        __file__=str(
+            tmp_path / "shadow/dcc_mcp_renderdoc/__init__.py"
+            if invalid_kind == "shadow_origin"
+            else valid_origin
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle.importlib,
+        "import_module",
+        lambda name: adapter_module if name == "dcc_mcp_renderdoc" else SimpleNamespace(),
+    )
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
         "version",
-        lambda name: "0.0.1" if name == "dcc-mcp-renderdoc" else "0.20.0",
+        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.0",
+    )
+    monkeypatch.setattr(
+        lifecycle.importlib.metadata,
+        "distribution",
+        lambda _name: _FakeDistribution(distribution_root, lifecycle.__version__),
     )
 
     with pytest.raises(lifecycle.LifecycleError) as caught:
         lifecycle._probe_python(Path(sys.executable))
 
     assert caught.value.exit_code == 10
-    assert caught.value.reason == "adapter_version_mismatch"
+    expected = (
+        "adapter_module_version_mismatch"
+        if invalid_kind == "module_version"
+        else "adapter_origin_mismatch"
+    )
+    assert caught.value.reason == expected
 
 
 def test_cross_target_python_timeout_is_stable_install_json(monkeypatch, capsys, tmp_path):
