@@ -302,7 +302,7 @@ def test_failed_qrenderdoc_probe_preserves_prior_managed_version(monkeypatch, tm
         "run",
         lambda args, **_kwargs: subprocess.CompletedProcess(
             args,
-            1 if Path(args[0]).name == "qrenderdoc" else 0,
+            1 if any(Path(argument).name == "qrenderdoc" for argument in args) else 0,
             "renderdoccmd v1.45",
             "qrenderdoc failed",
         ),

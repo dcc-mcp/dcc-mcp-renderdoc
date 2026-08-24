@@ -16,6 +16,10 @@ def _validate_install_result(report):
     Draft202012Validator(schema).validate(report)
 
 
+def _select_linux_managed_bundle(monkeypatch, lifecycle):
+    monkeypatch.setattr(lifecycle.sys, "platform", "linux")
+
+
 def test_compatibility_schema_matches_core_2320_canonical_contract():
     from dcc_mcp_renderdoc.install_contract import load_install_sop_schema
 
@@ -169,6 +173,8 @@ def test_managed_install_writes_digest_receipt_and_converges(
     tmp_path,
 ):
     from dcc_mcp_renderdoc import cli, lifecycle
+
+    _select_linux_managed_bundle(monkeypatch, lifecycle)
 
     destination = tmp_path / "cache" / "renderdoc" / "1.45-dddddddddddd"
     command = destination / "bin" / "renderdoccmd.exe"
@@ -392,6 +398,8 @@ def test_upgrade_requires_prior_receipt_before_acquisition(monkeypatch, capsys, 
 def test_default_managed_install_is_plan_only(monkeypatch, capsys, tmp_path):
     from dcc_mcp_renderdoc import cli, lifecycle
 
+    _select_linux_managed_bundle(monkeypatch, lifecycle)
+
     monkeypatch.setattr(
         lifecycle,
         "download_pinned",
@@ -420,8 +428,9 @@ def test_default_managed_install_is_plan_only(monkeypatch, capsys, tmp_path):
 def test_managed_plan_validates_bundle_override_and_records_python_source(
     monkeypatch, capsys, tmp_path
 ):
-    from dcc_mcp_renderdoc import cli
+    from dcc_mcp_renderdoc import cli, lifecycle
 
+    _select_linux_managed_bundle(monkeypatch, lifecycle)
     monkeypatch.setenv("DCC_MCP_INSTALL_PYTHON", sys.executable)
     receipt = tmp_path / "renderdoc.json"
     assert cli.run(["install", "--receipt-path", str(receipt), "--json"]) == 0
@@ -510,6 +519,8 @@ def test_failed_upgrade_probe_preserves_prior_working_receipt(monkeypatch, capsy
 
 def test_failed_managed_uninstall_restores_runtime_and_receipt(monkeypatch, capsys, tmp_path):
     from dcc_mcp_renderdoc import cli, lifecycle
+
+    _select_linux_managed_bundle(monkeypatch, lifecycle)
 
     destination = tmp_path / "cache" / "renderdoc" / "1.45-dddddddddddd"
     command = destination / "bin" / "renderdoccmd.exe"
