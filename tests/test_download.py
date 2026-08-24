@@ -224,16 +224,22 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
     )
     probes = []
 
-    def run_probe(args, **_kwargs):
+    def run_probe(args, **kwargs):
         probes.append(args)
         if "--python" in args:
+            qrenderdoc = next(
+                Path(argument) for argument in args if Path(argument).name == "qrenderdoc"
+            )
             python_cache = (
-                Path(args[0]).parents[1]
+                qrenderdoc.parents[1]
                 / "share/renderdoc/pylibs/lib/python3.6/__pycache__/json.cpython-36.pyc"
             )
             python_cache.parent.mkdir(parents=True)
             python_cache.write_bytes(b"managed-bytecode")
-            return subprocess.CompletedProcess(args, 0, "dcc-mcp-renderdoc-python-probe-ok\n", "")
+            Path(kwargs["env"]["DCC_MCP_RENDERDOC_PROBE_STATUS"]).write_text(
+                "dcc-mcp-renderdoc-python-probe-ok", encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(args, 0, "", "")
         output = "qrenderdoc v1.45" if "qrenderdoc" in str(args[0]) else "renderdoccmd v1.45"
         return subprocess.CompletedProcess(args, 0, output, "")
 
