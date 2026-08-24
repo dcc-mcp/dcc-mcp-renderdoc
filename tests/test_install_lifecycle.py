@@ -34,6 +34,36 @@ def test_compatibility_schema_matches_core_2320_canonical_contract():
     )
 
 
+def test_current_target_python_probe_reuses_proven_import_context(monkeypatch):
+    from dcc_mcp_renderdoc import lifecycle
+
+    imported = []
+    monkeypatch.setattr(
+        lifecycle.importlib,
+        "import_module",
+        lambda name: imported.append(name),
+    )
+    monkeypatch.setattr(
+        lifecycle.importlib.metadata,
+        "version",
+        lambda name: "0.5.0" if name == "dcc-mcp-renderdoc" else "0.20.0",
+    )
+    monkeypatch.setattr(
+        lifecycle.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current interpreter must not spawn a redundant probe")
+        ),
+    )
+
+    result = lifecycle._probe_python(Path(sys.executable))
+
+    assert result["python"] == str(Path(sys.executable).resolve())
+    assert result["core_version"] == "0.20.0"
+    assert result["resolution_source"] == "argument"
+    assert imported == ["dcc_mcp_renderdoc", "dcc_mcp_core"]
+
+
 def test_doctor_json_reports_preflight_with_stable_exit(
     monkeypatch,
     capsys,
@@ -80,6 +110,40 @@ def test_doctor_never_accepts_empty_executable_pair(monkeypatch, capsys, tmp_pat
     assert (
         next(step for step in report["prerequisites"] if step["id"] == "qrenderdoc")["ok"] is False
     )
+
+
+def test_doctor_version_only_pair_requires_embedded_python_marker(monkeypatch, capsys, tmp_path):
+    from dcc_mcp_renderdoc import cli, diagnostics
+
+    command = tmp_path / "renderdoccmd.exe"
+    command.write_bytes(b"renderdoc")
+    command.with_name("qrenderdoc.exe").write_bytes(b"qrenderdoc")
+    monkeypatch.setattr(diagnostics.sys, "platform", "win32")
+    monkeypatch.setattr(diagnostics, "_core_version", lambda: "0.20.0")
+    monkeypatch.setattr(
+        diagnostics,
+        "probe_runtime",
+        lambda *_args, **_kwargs: {
+            "renderdoccmd_version": "1.45",
+            "qrenderdoc_version": "1.45",
+        },
+    )
+
+    def fail_embedded_probe(_qrenderdoc):
+        raise RuntimeError("injected embedded-Python load failure")
+
+    monkeypatch.setattr(diagnostics, "probe_qrenderdoc_python", fail_embedded_probe)
+
+    exit_code = cli.run(["doctor", "--command", str(command), "--json"])
+    report = json.loads(capsys.readouterr().out)
+
+    _validate_install_result(report)
+    assert exit_code == 10
+    assert report["directly_usable"] is False
+    assert report["verify"]["directly_usable"] is False
+    qrenderdoc = next(step for step in report["prerequisites"] if step["id"] == "qrenderdoc")
+    assert qrenderdoc["ok"] is False
+    assert qrenderdoc["probe_error"] == "embedded_python_probe_failed"
 
 
 def test_verify_json_requires_a_receipt_before_direct_usability(

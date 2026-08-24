@@ -423,7 +423,14 @@ def _receipt_command(destination: Path, bundle: RenderDocBundle) -> Path | None:
         return None
     command = _safe_destination(destination, command_relative)
     qrenderdoc = _safe_destination(destination, qrenderdoc_relative)
-    if not command.is_file() or not qrenderdoc.is_file() or qrenderdoc.parent != command.parent:
+    expected_qrenderdoc = "qrenderdoc.exe" if bundle.command_name.endswith(".exe") else "qrenderdoc"
+    if (
+        command.name != bundle.command_name
+        or qrenderdoc.name != expected_qrenderdoc
+        or not command.is_file()
+        or not qrenderdoc.is_file()
+        or qrenderdoc.parent != command.parent
+    ):
         return None
     try:
         actual = _owned_files(destination)
@@ -487,17 +494,40 @@ def _cleanup_superseded(root: Path, keep: Path) -> None:
             metadata = json.loads(receipt.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        version = metadata.get("version") if isinstance(metadata, dict) else None
-        checksum = metadata.get("sha256") if isinstance(metadata, dict) else None
-        if (
-            isinstance(metadata, dict)
-            and metadata.get("schema_version") == 1
-            and isinstance(version, str)
-            and isinstance(checksum, str)
-            and re.fullmatch(r"[0-9]+\.[0-9]+", version) is not None
-            and re.fullmatch(r"[0-9a-f]{64}", checksum) is not None
-            and candidate.name == f"{version}-{checksum[:12]}"
-        ):
+        if not isinstance(metadata, dict):
+            continue
+        version = metadata.get("version")
+        url = metadata.get("url")
+        checksum = metadata.get("sha256")
+        command_relative = metadata.get("command")
+        if not all(isinstance(value, str) for value in (version, url, checksum, command_relative)):
+            continue
+        command_name = Path(command_relative).name
+        if command_name == "renderdoccmd.exe":
+            platform = "win32"
+        elif command_name == "renderdoccmd":
+            platform = "linux"
+        else:
+            continue
+        try:
+            bundle = _validate_bundle(
+                RenderDocBundle(
+                    version=version,
+                    url=url,
+                    sha256=checksum,
+                    command_name=command_name,
+                ),
+                platform,
+            )
+        except RuntimeError:
+            continue
+        if candidate.name != f"{bundle.version}-{bundle.sha256[:12]}":
+            continue
+        try:
+            verified_command = _receipt_command(candidate, bundle)
+        except (OSError, RuntimeError):
+            continue
+        if verified_command is not None:
             shutil.rmtree(candidate)
 
 

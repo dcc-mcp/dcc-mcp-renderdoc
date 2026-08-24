@@ -199,13 +199,25 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
     root = cache / "renderdoc"
     old_checksum = "1" * 64
     old_managed = root / f"1.44-{old_checksum[:12]}"
-    old_managed.mkdir(parents=True)
+    old_command = old_managed / "bin/renderdoccmd"
+    old_qrenderdoc = old_command.with_name("qrenderdoc")
+    old_command.parent.mkdir(parents=True)
+    old_command.write_bytes(b"old-renderdoc")
+    old_qrenderdoc.write_bytes(b"old-qrenderdoc")
     (old_managed / ".dcc-mcp-renderdoc.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "version": "1.44",
+                "url": "https://renderdoc.org/stable/1.44/renderdoc_1.44.tar.gz",
                 "sha256": old_checksum,
+                "command": "bin/renderdoccmd",
+                "qrenderdoc": "bin/qrenderdoc",
+                "files": {
+                    "bin/renderdoccmd": hashlib.sha256(b"old-renderdoc").hexdigest(),
+                    "bin/qrenderdoc": hashlib.sha256(b"old-qrenderdoc").hexdigest(),
+                },
+                "probe": {"qrenderdoc_python_probe": "loaded"},
             }
         ),
         encoding="utf-8",
@@ -283,6 +295,50 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
     nested.write_bytes(b"tampered")
     with pytest.raises(RuntimeError, match="integrity receipt"):
         runtime_downloader.download_pinned()
+
+
+@pytest.mark.parametrize("invalid_kind", ["weak", "forged", "escaped", "tampered", "unowned"])
+def test_cleanup_preserves_unproven_superseded_candidate(tmp_path, invalid_kind):
+    root = tmp_path / "renderdoc"
+    checksum = "1" * 64
+    victim = root / f"1.44-{checksum[:12]}"
+    command = victim / "bin/renderdoccmd"
+    qrenderdoc = command.with_name("qrenderdoc")
+    command.parent.mkdir(parents=True)
+    command.write_bytes(b"operator-renderdoc")
+    qrenderdoc.write_bytes(b"operator-qrenderdoc")
+    metadata = {
+        "schema_version": 1,
+        "version": "1.44",
+        "url": "https://renderdoc.org/stable/1.44/renderdoc_1.44.tar.gz",
+        "sha256": checksum,
+        "command": "bin/renderdoccmd",
+        "qrenderdoc": "bin/qrenderdoc",
+        "files": {
+            "bin/renderdoccmd": hashlib.sha256(b"operator-renderdoc").hexdigest(),
+            "bin/qrenderdoc": hashlib.sha256(b"operator-qrenderdoc").hexdigest(),
+        },
+        "probe": {"qrenderdoc_python_probe": "loaded"},
+    }
+    if invalid_kind == "weak":
+        metadata = {key: metadata[key] for key in ("schema_version", "version", "sha256")}
+    elif invalid_kind == "forged":
+        metadata["url"] = "https://example.invalid/operator.tar.gz"
+    elif invalid_kind == "escaped":
+        metadata["command"] = "../renderdoccmd"
+        metadata["qrenderdoc"] = "../qrenderdoc"
+    elif invalid_kind == "tampered":
+        metadata["files"]["bin/renderdoccmd"] = "0" * 64
+    else:
+        (victim / "operator-notes.txt").write_text("keep me", encoding="utf-8")
+    (victim / ".dcc-mcp-renderdoc.json").write_text(json.dumps(metadata), encoding="utf-8")
+    keep = root / "1.45-222222222222"
+    keep.mkdir()
+
+    runtime_downloader._cleanup_superseded(root, keep)
+
+    assert victim.is_dir()
+    assert command.read_bytes() == b"operator-renderdoc"
 
 
 def test_failed_qrenderdoc_python_probe_preserves_prior_managed_version(monkeypatch, tmp_path):

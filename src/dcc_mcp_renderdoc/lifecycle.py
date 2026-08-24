@@ -136,38 +136,56 @@ def _probe_python(value: Optional[Path]) -> dict[str, str]:
             "python_missing",
             "The selected target interpreter does not exist.",
         )
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", _PYTHON_PROBE],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LifecycleError(
-            INSTALL_EXIT_PREFLIGHT,
-            "preflight",
-            "python_probe_failed",
-            f"The selected target interpreter could not be probed: {type(exc).__name__}.",
-        ) from exc
-    if completed.returncode != 0:
-        raise LifecycleError(
-            INSTALL_EXIT_PREFLIGHT,
-            "preflight",
-            "target_import_failed",
-            "The target interpreter cannot import this adapter and dcc-mcp-core.",
-        )
-    try:
-        result = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise LifecycleError(
-            INSTALL_EXIT_PREFLIGHT,
-            "preflight",
-            "python_probe_invalid",
-            "The selected target interpreter returned invalid probe data.",
-        ) from exc
+    if python == Path(sys.executable).resolve():
+        try:
+            importlib.import_module("dcc_mcp_renderdoc")
+            importlib.import_module("dcc_mcp_core")
+            result = {
+                "python": str(python),
+                "python_version": sys.version.split()[0],
+                "adapter_version": importlib.metadata.version("dcc-mcp-renderdoc"),
+                "core_version": importlib.metadata.version("dcc-mcp-core"),
+            }
+        except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
+            raise LifecycleError(
+                INSTALL_EXIT_PREFLIGHT,
+                "preflight",
+                "target_import_failed",
+                "The target interpreter cannot import this adapter and dcc-mcp-core.",
+            ) from exc
+    else:
+        try:
+            completed = subprocess.run(
+                [str(python), "-c", _PYTHON_PROBE],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LifecycleError(
+                INSTALL_EXIT_PREFLIGHT,
+                "preflight",
+                "python_probe_failed",
+                f"The selected target interpreter could not be probed: {type(exc).__name__}.",
+            ) from exc
+        if completed.returncode != 0:
+            raise LifecycleError(
+                INSTALL_EXIT_PREFLIGHT,
+                "preflight",
+                "target_import_failed",
+                "The target interpreter cannot import this adapter and dcc-mcp-core.",
+            )
+        try:
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise LifecycleError(
+                INSTALL_EXIT_PREFLIGHT,
+                "preflight",
+                "python_probe_invalid",
+                "The selected target interpreter returned invalid probe data.",
+            ) from exc
     if not isinstance(result, dict) or not _meets_floor(
         str(result.get("core_version") or ""), MIN_CORE_VERSION
     ):
