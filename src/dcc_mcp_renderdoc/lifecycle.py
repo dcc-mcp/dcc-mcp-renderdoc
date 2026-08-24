@@ -372,6 +372,13 @@ def _verify_owned_files(destination: Path, files: Any) -> None:
             "owned_file_manifest_missing",
             "The managed receipt has no owned-file digest manifest.",
         )
+    if not all(isinstance(path, str) and isinstance(digest, str) for path, digest in files.items()):
+        raise LifecycleError(
+            INSTALL_EXIT_VERIFY,
+            "artifact",
+            "owned_file_manifest_invalid",
+            "The managed receipt owned-file manifest is malformed.",
+        )
     actual: dict[str, str] = {}
     for path in sorted(destination.rglob("*")):
         if path.is_symlink():
@@ -384,11 +391,27 @@ def _verify_owned_files(destination: Path, files: Any) -> None:
         if path.is_file() and path.name != ".dcc-mcp-renderdoc.json":
             actual[path.relative_to(destination).as_posix()] = _sha256(path)
     if actual != files:
+        expected_paths = set(files)
+        actual_paths = set(actual)
+        missing = sorted(expected_paths - actual_paths)
+        unexpected = sorted(actual_paths - expected_paths)
+        changed = sorted(
+            path for path in expected_paths & actual_paths if files[path] != actual[path]
+        )
+        summaries = []
+        for label, paths in (
+            ("missing", missing),
+            ("unexpected", unexpected),
+            ("changed", changed),
+        ):
+            if paths:
+                summaries.append(f"{label}={','.join(paths[:5])}")
         raise LifecycleError(
             INSTALL_EXIT_VERIFY,
             "artifact",
             "owned_file_digest_mismatch",
-            "The managed RenderDoc files do not match their receipt digests.",
+            "The managed RenderDoc files do not match their receipt digests"
+            f" ({'; '.join(summaries)}).",
         )
 
 

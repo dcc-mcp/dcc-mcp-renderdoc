@@ -369,6 +369,30 @@ def test_empty_qrenderdoc_file_never_proves_direct_usability(capsys, tmp_path):
     assert report["verify"]["failure_reason"] == "runtime_probe_failed"
 
 
+def test_owned_file_mismatch_reports_bounded_relative_diff(tmp_path):
+    from dcc_mcp_renderdoc import lifecycle
+
+    destination = tmp_path / "managed"
+    destination.mkdir()
+    (destination / "changed.bin").write_bytes(b"new")
+    (destination / "unexpected.bin").write_bytes(b"extra")
+    expected = {
+        "changed.bin": hashlib.sha256(b"old").hexdigest(),
+        "missing.bin": hashlib.sha256(b"missing").hexdigest(),
+    }
+
+    try:
+        lifecycle._verify_owned_files(destination, expected)
+    except lifecycle.LifecycleError as exc:
+        assert exc.reason == "owned_file_digest_mismatch"
+        assert "missing=missing.bin" in str(exc)
+        assert "unexpected=unexpected.bin" in str(exc)
+        assert "changed=changed.bin" in str(exc)
+        assert str(destination) not in str(exc)
+    else:
+        raise AssertionError("digest mismatch must fail")
+
+
 def test_upgrade_requires_prior_receipt_before_acquisition(monkeypatch, capsys, tmp_path):
     from dcc_mcp_renderdoc import cli, lifecycle
 
