@@ -14,6 +14,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from .__version__ import __version__
 from .diagnostics import MIN_CORE_VERSION, MIN_RENDERDOC_VERSION, _meets_floor
@@ -108,13 +110,85 @@ import json
 import sys
 import dcc_mcp_renderdoc
 import dcc_mcp_core
+distribution = importlib.metadata.distribution("dcc-mcp-renderdoc")
 print(json.dumps({
     "python": sys.executable,
     "python_version": sys.version.split()[0],
-    "adapter_version": importlib.metadata.version("dcc-mcp-renderdoc"),
+    "adapter_version": distribution.version,
+    "adapter_distribution_version": distribution.version,
+    "adapter_module_version": getattr(dcc_mcp_renderdoc, "__version__", None),
+    "adapter_module_origin": getattr(dcc_mcp_renderdoc, "__file__", None),
+    "adapter_distribution_root": str(distribution.locate_file("")),
+    "adapter_direct_url": distribution.read_text("direct_url.json"),
     "core_version": importlib.metadata.version("dcc-mcp-core"),
 }))
 """
+
+_INTERNAL_PYTHON_PROBE_FIELDS = {
+    "adapter_distribution_version",
+    "adapter_module_version",
+    "adapter_module_origin",
+    "adapter_distribution_root",
+    "adapter_direct_url",
+}
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _adapter_origin_associated(result: dict[str, Any]) -> bool:
+    origin_value = result.get("adapter_module_origin")
+    root_value = result.get("adapter_distribution_root")
+    if (
+        not isinstance(origin_value, str)
+        or not origin_value
+        or len(origin_value) > 4096
+        or not isinstance(root_value, str)
+        or not root_value
+        or len(root_value) > 4096
+    ):
+        return False
+    try:
+        origin = Path(origin_value).resolve()
+        distribution_root = Path(root_value).resolve()
+    except OSError:
+        return False
+    if not origin.is_file():
+        return False
+    if _within(origin, distribution_root / "dcc_mcp_renderdoc"):
+        return True
+
+    direct_url_text = result.get("adapter_direct_url")
+    if not isinstance(direct_url_text, str) or len(direct_url_text) > 8192:
+        return False
+    try:
+        direct_url = json.loads(direct_url_text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(direct_url, dict):
+        return False
+    directory = direct_url.get("dir_info")
+    if not isinstance(directory, dict) or directory.get("editable") is not True:
+        return False
+    parsed = urlparse(str(direct_url.get("url") or ""))
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        return False
+    try:
+        source_root = Path(url2pathname(unquote(parsed.path))).resolve()
+    except OSError:
+        return False
+    return any(
+        _within(origin, package_root)
+        for package_root in (
+            source_root / "src/dcc_mcp_renderdoc",
+            source_root / "dcc_mcp_renderdoc",
+        )
+    )
 
 
 def _probe_python(value: Optional[Path]) -> dict[str, str]:
@@ -138,15 +212,26 @@ def _probe_python(value: Optional[Path]) -> dict[str, str]:
         )
     if python == Path(sys.executable).resolve():
         try:
-            importlib.import_module("dcc_mcp_renderdoc")
+            adapter_module = importlib.import_module("dcc_mcp_renderdoc")
             importlib.import_module("dcc_mcp_core")
+            distribution = importlib.metadata.distribution("dcc-mcp-renderdoc")
             result = {
                 "python": str(python),
                 "python_version": sys.version.split()[0],
-                "adapter_version": importlib.metadata.version("dcc-mcp-renderdoc"),
+                "adapter_version": distribution.version,
+                "adapter_distribution_version": distribution.version,
+                "adapter_module_version": getattr(adapter_module, "__version__", None),
+                "adapter_module_origin": getattr(adapter_module, "__file__", None),
+                "adapter_distribution_root": str(distribution.locate_file("")),
+                "adapter_direct_url": distribution.read_text("direct_url.json"),
                 "core_version": importlib.metadata.version("dcc-mcp-core"),
             }
-        except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
+        except (
+            AttributeError,
+            ImportError,
+            OSError,
+            importlib.metadata.PackageNotFoundError,
+        ) as exc:
             raise LifecycleError(
                 INSTALL_EXIT_PREFLIGHT,
                 "preflight",
@@ -193,12 +278,29 @@ def _probe_python(value: Optional[Path]) -> dict[str, str]:
             "python_probe_invalid",
             "The selected target interpreter returned invalid probe data.",
         )
-    if result.get("adapter_version") != __version__:
+    if (
+        result.get("adapter_version") != __version__
+        or result.get("adapter_distribution_version") != __version__
+    ):
         raise LifecycleError(
             INSTALL_EXIT_PREFLIGHT,
             "preflight",
             "adapter_version_mismatch",
             "The target interpreter must import this exact dcc-mcp-renderdoc version.",
+        )
+    if result.get("adapter_module_version") != __version__:
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "preflight",
+            "adapter_module_version_mismatch",
+            "The imported dcc-mcp-renderdoc module does not match this adapter version.",
+        )
+    if not _adapter_origin_associated(result):
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "preflight",
+            "adapter_origin_mismatch",
+            "The imported dcc-mcp-renderdoc module is not associated with its distribution.",
         )
     if not _meets_floor(str(result.get("core_version") or ""), MIN_CORE_VERSION):
         raise LifecycleError(
@@ -207,7 +309,11 @@ def _probe_python(value: Optional[Path]) -> dict[str, str]:
             "core_version_unsupported",
             f"dcc-mcp-core {MIN_CORE_VERSION}+ is required in the target interpreter.",
         )
-    normalized = {str(key): str(value) for key, value in result.items()}
+    normalized = {
+        str(key): str(value)
+        for key, value in result.items()
+        if key not in _INTERNAL_PYTHON_PROBE_FIELDS
+    }
     normalized["resolution_source"] = resolution_source
     return normalized
 
