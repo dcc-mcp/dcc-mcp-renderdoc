@@ -189,6 +189,10 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         qrenderdoc.mode = 0o755
         qrenderdoc.size = len(qrenderdoc_bytes)
         bundle.addfile(qrenderdoc, io.BytesIO(qrenderdoc_bytes))
+        nested_receipt_bytes = b"nested archive payload"
+        nested_receipt = tarfile.TarInfo("renderdoc_1.45/share/renderdoc/.dcc-mcp-renderdoc.json")
+        nested_receipt.size = len(nested_receipt_bytes)
+        bundle.addfile(nested_receipt, io.BytesIO(nested_receipt_bytes))
     archive = payload.getvalue()
     checksum = hashlib.sha256(archive).hexdigest()
     cache = tmp_path / "cache"
@@ -256,6 +260,9 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         "renderdoc_1.45/share/renderdoc/pylibs/lib/python3.6/__pycache__/json.cpython-36.pyc": (
             hashlib.sha256(b"managed-bytecode").hexdigest()
         ),
+        "renderdoc_1.45/share/renderdoc/.dcc-mcp-renderdoc.json": hashlib.sha256(
+            nested_receipt_bytes
+        ).hexdigest(),
     }
     assert any(Path(arguments[-1]).name == "_runtime_probe.py" for arguments in probes)
     assert receipt["qrenderdoc"] == "renderdoc_1.45/bin/qrenderdoc"
@@ -272,7 +279,8 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
     )
     assert runtime_downloader.download_pinned() == installed
 
-    installed.write_bytes(b"tampered")
+    nested = installed.parents[1] / "share/renderdoc/.dcc-mcp-renderdoc.json"
+    nested.write_bytes(b"tampered")
     with pytest.raises(RuntimeError, match="integrity receipt"):
         runtime_downloader.download_pinned()
 

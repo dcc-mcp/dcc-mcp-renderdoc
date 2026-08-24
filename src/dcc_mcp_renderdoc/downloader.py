@@ -322,8 +322,8 @@ def probe_runtime(command: Path, *, expected_version: str | None = None) -> dict
     }
 
 
-def _warm_qrenderdoc_python(qrenderdoc: Path) -> None:
-    """Load the managed embedded Python before its generated files are receipted."""
+def probe_qrenderdoc_python(qrenderdoc: Path) -> None:
+    """Prove bounded embedded-Python loadability with a completion marker."""
     script = Path(__file__).with_name("_runtime_probe.py")
     if not script.is_file():
         raise RuntimeError("qrenderdoc embedded-Python probe helper is missing")
@@ -381,12 +381,12 @@ def _warm_qrenderdoc_python(qrenderdoc: Path) -> None:
 
 
 def _owned_files(root: Path) -> dict[str, str]:
-    receipt_name = ".dcc-mcp-renderdoc.json"
+    receipt_path = root / ".dcc-mcp-renderdoc.json"
     files: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             raise RuntimeError(f"Managed RenderDoc payload contains a link: {path.name}")
-        if path.is_file() and path.name != receipt_name:
+        if path.is_file() and path != receipt_path:
             relative = path.relative_to(root).as_posix()
             files[relative] = _sha256_file(path)
     return files
@@ -411,11 +411,14 @@ def _receipt_command(destination: Path, bundle: RenderDocBundle) -> Path | None:
     command_relative = receipt.get("command")
     qrenderdoc_relative = receipt.get("qrenderdoc")
     files = receipt.get("files")
+    probe = receipt.get("probe")
     if (
         not isinstance(command_relative, str)
         or not isinstance(qrenderdoc_relative, str)
         or not isinstance(files, dict)
         or not files
+        or not isinstance(probe, dict)
+        or probe.get("qrenderdoc_python_probe") != "loaded"
     ):
         return None
     command = _safe_destination(destination, command_relative)
@@ -535,7 +538,8 @@ def download_pinned(bundle: RenderDocBundle | None = None) -> Path:
             command.chmod(command.stat().st_mode | 0o111)
             qrenderdoc.chmod(qrenderdoc.stat().st_mode | 0o111)
         probe = probe_runtime(command, expected_version=selected.version)
-        _warm_qrenderdoc_python(qrenderdoc)
+        probe_qrenderdoc_python(qrenderdoc)
+        probe["qrenderdoc_python_probe"] = "loaded"
         command_relative = command.relative_to(staging).as_posix()
         qrenderdoc_relative = qrenderdoc.relative_to(staging).as_posix()
         receipt = {
