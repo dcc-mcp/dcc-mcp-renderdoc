@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .__version__ import __version__
-from .downloader import PINNED_VERSION, _configured_bundle, probe_runtime
+from .downloader import (
+    PINNED_VERSION,
+    _configured_bundle,
+    probe_qrenderdoc_python,
+    probe_runtime,
+)
 
 MIN_CORE_VERSION = "0.19.45"
 MIN_RENDERDOC_VERSION = "1.20"
@@ -99,7 +104,20 @@ def build_report(operation: str, *, command: Optional[str] = None) -> dict[str, 
         else "qrenderdoc"
     )
     qrenderdoc = executable.with_name(qrenderdoc_name) if executable is not None else None
-    qrenderdoc_ok = qrenderdoc is not None and qrenderdoc.is_file() and runtime_probe is not None
+    embedded_probe_error: Optional[str] = None
+    if qrenderdoc is not None and qrenderdoc.is_file() and runtime_probe is not None:
+        try:
+            probe_qrenderdoc_python(qrenderdoc)
+        except RuntimeError:
+            embedded_probe_error = "embedded_python_probe_failed"
+        else:
+            runtime_probe["qrenderdoc_python_probe"] = "loaded"
+    qrenderdoc_ok = (
+        qrenderdoc is not None
+        and qrenderdoc.is_file()
+        and runtime_probe is not None
+        and runtime_probe.get("qrenderdoc_python_probe") == "loaded"
+    )
     display_configured = sys.platform == "win32" or (
         sys.platform.startswith("linux")
         and bool(
@@ -129,7 +147,12 @@ def build_report(operation: str, *, command: Optional[str] = None) -> dict[str, 
             source=command_source,
             version_error=version_error,
         ),
-        _prerequisite("qrenderdoc", qrenderdoc_ok, found=qrenderdoc_ok),
+        _prerequisite(
+            "qrenderdoc",
+            qrenderdoc_ok,
+            found=qrenderdoc is not None and qrenderdoc.is_file(),
+            probe_error=embedded_probe_error,
+        ),
         _prerequisite("display", display_configured, configured=display_configured),
         _prerequisite("endpoint_configuration", port_ok, configured_port=configured_port),
         _prerequisite("download_integrity_configuration", pin_configuration_ok),
