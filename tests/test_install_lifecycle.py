@@ -196,6 +196,7 @@ def test_managed_install_writes_digest_receipt_and_converges(
                 "command": "bin/renderdoccmd.exe",
                 "qrenderdoc": "bin/qrenderdoc.exe",
                 "files": files,
+                "probe": {"qrenderdoc_python_probe": "loaded"},
             }
         ),
         encoding="utf-8",
@@ -211,6 +212,7 @@ def test_managed_install_writes_digest_receipt_and_converges(
             "qrenderdoc_version": "1.45",
         },
     )
+    monkeypatch.setattr(lifecycle, "probe_qrenderdoc_python", lambda *_args: None)
 
     argv = [
         "install",
@@ -299,6 +301,7 @@ def test_manual_runtime_round_trip_status_verify_and_idempotent_uninstall(
             "qrenderdoc_version": "1.45",
         },
     )
+    monkeypatch.setattr(lifecycle, "probe_qrenderdoc_python", lambda *_args: None)
     common = [
         "--dcc-path",
         str(command),
@@ -338,6 +341,44 @@ def test_manual_runtime_round_trip_status_verify_and_idempotent_uninstall(
     absent = json.loads(capsys.readouterr().out)
     _validate_install_result(absent)
     assert absent["install_state"] == "fresh"
+
+
+def test_manual_runtime_version_only_probe_fails_closed(monkeypatch, capsys, tmp_path):
+    from dcc_mcp_renderdoc import cli, lifecycle
+
+    command = tmp_path / "renderdoccmd.exe"
+    command.write_bytes(b"renderdoc")
+    command.with_name("qrenderdoc.exe").write_bytes(b"qrenderdoc")
+    receipt = tmp_path / "renderdoc.json"
+    monkeypatch.setattr(
+        lifecycle,
+        "probe_runtime",
+        lambda *_args, **_kwargs: {
+            "renderdoccmd_version": "1.45",
+            "qrenderdoc_version": "1.45",
+        },
+    )
+
+    exit_code = cli.run(
+        [
+            "install",
+            "--dcc-path",
+            str(command),
+            "--python",
+            sys.executable,
+            "--receipt-path",
+            str(receipt),
+            "--json",
+            "--yes",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    _validate_install_result(report)
+    assert exit_code == 10
+    assert report["verify"]["directly_usable"] is False
+    assert report["verify"]["failure_reason"] == "manual_runtime_unverified"
+    assert not receipt.exists()
 
 
 def test_empty_qrenderdoc_file_never_proves_direct_usability(capsys, tmp_path):
@@ -391,6 +432,29 @@ def test_owned_file_mismatch_reports_bounded_relative_diff(tmp_path):
         assert str(destination) not in str(exc)
     else:
         raise AssertionError("digest mismatch must fail")
+
+
+def test_nested_cache_receipt_name_is_owned_and_tamper_checked(tmp_path):
+    from dcc_mcp_renderdoc import lifecycle
+
+    destination = tmp_path / "managed"
+    nested = destination / "payload" / ".dcc-mcp-renderdoc.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"owned nested payload")
+    expected = {
+        "payload/.dcc-mcp-renderdoc.json": hashlib.sha256(b"owned nested payload").hexdigest()
+    }
+
+    lifecycle._verify_owned_files(destination, expected)
+    nested.write_bytes(b"tampered")
+
+    try:
+        lifecycle._verify_owned_files(destination, expected)
+    except lifecycle.LifecycleError as exc:
+        assert exc.reason == "owned_file_digest_mismatch"
+        assert "changed=payload/.dcc-mcp-renderdoc.json" in str(exc)
+    else:
+        raise AssertionError("nested receipt-name tamper must fail")
 
 
 def test_upgrade_requires_prior_receipt_before_acquisition(monkeypatch, capsys, tmp_path):
@@ -519,6 +583,7 @@ def test_failed_upgrade_probe_preserves_prior_working_receipt(monkeypatch, capsy
         return {"renderdoccmd_version": "1.44", "qrenderdoc_version": "1.44"}
 
     monkeypatch.setattr(lifecycle, "probe_runtime", probe)
+    monkeypatch.setattr(lifecycle, "probe_qrenderdoc_python", lambda *_args: None)
     common = [
         "--python",
         sys.executable,
@@ -566,6 +631,7 @@ def test_failed_managed_uninstall_restores_runtime_and_receipt(monkeypatch, caps
                 "command": "bin/renderdoccmd.exe",
                 "qrenderdoc": "bin/qrenderdoc.exe",
                 "files": files,
+                "probe": {"qrenderdoc_python_probe": "loaded"},
             }
         ),
         encoding="utf-8",
@@ -614,6 +680,85 @@ def test_failed_managed_uninstall_restores_runtime_and_receipt(monkeypatch, caps
     assert qrenderdoc.read_bytes() == b"qrenderdoc"
 
 
+def test_windows_uninstall_copy_failure_is_stable_and_preserves_state(
+    monkeypatch, capsys, tmp_path
+):
+    from dcc_mcp_renderdoc import cli, lifecycle
+
+    destination = tmp_path / "managed"
+    destination.mkdir()
+    (destination / "runtime.bin").write_bytes(b"runtime")
+    receipt = tmp_path / "renderdoc.json"
+    receipt_bytes = json.dumps(
+        {"receipt_version": 1, "dcc_type": "renderdoc"}, sort_keys=True
+    ).encode("utf-8")
+    receipt.write_bytes(receipt_bytes)
+    monkeypatch.setattr(
+        lifecycle,
+        "_verify_receipt",
+        lambda *_args, **_kwargs: {"managed_destination": str(destination)},
+    )
+    monkeypatch.setattr(lifecycle.sys, "platform", "win32")
+
+    def fail_copy(_source, restore_copy):
+        restore_copy.mkdir()
+        (restore_copy / "partial.bin").write_bytes(b"partial")
+        raise PermissionError("injected locked copy")
+
+    monkeypatch.setattr(lifecycle.shutil, "copytree", fail_copy)
+
+    exit_code = cli.run(["uninstall", "--receipt-path", str(receipt), "--json", "--yes"])
+    report = json.loads(capsys.readouterr().out)
+
+    _validate_install_result(report)
+    assert exit_code == 50
+    assert report["verify"]["failure_reason"] == "runtime_locked"
+    assert destination.joinpath("runtime.bin").read_bytes() == b"runtime"
+    assert receipt.read_bytes() == receipt_bytes
+    assert not list(tmp_path.glob(".managed.restore-*"))
+    assert not list(tmp_path.glob(".renderdoc.json.uninstall-*"))
+
+
+def test_windows_uninstall_backup_cleanup_failure_is_stable_after_commit(
+    monkeypatch, capsys, tmp_path
+):
+    from dcc_mcp_renderdoc import cli, lifecycle
+
+    destination = tmp_path / "managed"
+    destination.mkdir()
+    (destination / "runtime.bin").write_bytes(b"runtime")
+    receipt = tmp_path / "renderdoc.json"
+    receipt.write_text(
+        json.dumps({"receipt_version": 1, "dcc_type": "renderdoc"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_verify_receipt",
+        lambda *_args, **_kwargs: {"managed_destination": str(destination)},
+    )
+    monkeypatch.setattr(lifecycle.sys, "platform", "win32")
+    real_rmtree = lifecycle.shutil.rmtree
+
+    def fail_restore_cleanup(path, *args, **kwargs):
+        if ".restore-" in Path(path).name:
+            raise PermissionError("injected locked backup")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle.shutil, "rmtree", fail_restore_cleanup)
+
+    exit_code = cli.run(["uninstall", "--receipt-path", str(receipt), "--json", "--yes"])
+    report = json.loads(capsys.readouterr().out)
+
+    _validate_install_result(report)
+    assert exit_code == 50
+    assert report["verify"]["failure_reason"] == "cleanup_requires_restart"
+    assert not destination.exists()
+    assert not receipt.exists()
+    backups = list(tmp_path.glob(".managed.restore-*"))
+    assert len(backups) == 1
+    assert backups[0].joinpath("runtime.bin").read_bytes() == b"runtime"
+
+
 def test_failed_upgrade_receipt_commit_preserves_previous_receipt(monkeypatch, capsys, tmp_path):
     from dcc_mcp_renderdoc import cli, lifecycle
 
@@ -632,6 +777,7 @@ def test_failed_upgrade_receipt_commit_preserves_previous_receipt(monkeypatch, c
             "qrenderdoc_version": "1.45" if command == new_command.resolve() else "1.44",
         },
     )
+    monkeypatch.setattr(lifecycle, "probe_qrenderdoc_python", lambda *_args: None)
     common = ["--python", sys.executable, "--receipt-path", str(receipt), "--json"]
     assert cli.run(["install", "--dcc-path", str(old_command), *common, "--yes"]) == 0
     capsys.readouterr()

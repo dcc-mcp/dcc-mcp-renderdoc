@@ -22,6 +22,7 @@ from .downloader import (
     _cleanup_superseded,
     _configured_bundle,
     download_pinned,
+    probe_qrenderdoc_python,
     probe_runtime,
 )
 from .install_contract import (
@@ -215,6 +216,19 @@ def _probe_runtime_checked(command: Path) -> dict[str, str]:
         ) from exc
 
 
+def _probe_manual_embedded_python(qrenderdoc: Path) -> None:
+    try:
+        probe_qrenderdoc_python(qrenderdoc)
+    except RuntimeError as exc:
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "runtime",
+            "manual_runtime_unverified",
+            "The manual RenderDoc runtime did not prove bounded embedded-Python "
+            "loadability; use the managed pinned runtime.",
+        ) from exc
+
+
 def _managed_receipt(command: Path) -> tuple[Path, dict[str, Any]]:
     destination = next(
         (parent for parent in command.parents if (parent / ".dcc-mcp-renderdoc.json").is_file()),
@@ -231,12 +245,20 @@ def _managed_receipt(command: Path) -> tuple[Path, dict[str, Any]]:
             "The managed RenderDoc cache receipt is missing or unreadable.",
         ) from exc
     files = receipt.get("files") if isinstance(receipt, dict) else None
+    probe = receipt.get("probe") if isinstance(receipt, dict) else None
     if not isinstance(files, dict) or not files:
         raise LifecycleError(
             INSTALL_EXIT_PREFLIGHT,
             "receipt",
             "managed_receipt_manifest_missing",
             "The managed RenderDoc cache receipt has no owned-file digest manifest.",
+        )
+    if not isinstance(probe, dict) or probe.get("qrenderdoc_python_probe") != "loaded":
+        raise LifecycleError(
+            INSTALL_EXIT_PREFLIGHT,
+            "runtime",
+            "managed_runtime_unverified",
+            "The managed cache receipt does not prove embedded-Python loadability.",
         )
     command_relative = receipt.get("command")
     qrenderdoc_relative = receipt.get("qrenderdoc")
@@ -388,7 +410,7 @@ def _verify_owned_files(destination: Path, files: Any) -> None:
                 "owned_file_link_unsafe",
                 "The managed RenderDoc cache contains an unexpected link.",
             )
-        if path.is_file() and path.name != ".dcc-mcp-renderdoc.json":
+        if path.is_file() and path != destination / ".dcc-mcp-renderdoc.json":
             actual[path.relative_to(destination).as_posix()] = _sha256(path)
     if actual != files:
         expected_paths = set(files)
@@ -415,7 +437,13 @@ def _verify_owned_files(destination: Path, files: Any) -> None:
         )
 
 
-def _verify_receipt(args: argparse.Namespace, receipt: dict[str, Any]) -> dict[str, Any]:
+def _verify_receipt(
+    args: argparse.Namespace,
+    receipt: dict[str, Any],
+    *,
+    allow_manual_unverified: bool = False,
+    manual_probe_already_verified: bool = False,
+) -> dict[str, Any]:
     command = _path_from_receipt(receipt, "command")
     qrenderdoc = _path_from_receipt(receipt, "qrenderdoc")
     if args.dcc_path is not None and args.dcc_path.expanduser().resolve() != command:
@@ -512,6 +540,22 @@ def _verify_receipt(args: argparse.Namespace, receipt: dict[str, Any]) -> dict[s
             "renderdoc_version_unsupported",
             f"RenderDoc {MIN_RENDERDOC_VERSION}+ is required.",
         )
+    recorded_runtime = receipt.get("runtime")
+    if managed:
+        if (
+            not isinstance(recorded_runtime, dict)
+            or recorded_runtime.get("qrenderdoc_python_probe") != "loaded"
+        ):
+            raise LifecycleError(
+                INSTALL_EXIT_VERIFY,
+                "runtime",
+                "managed_runtime_unverified",
+                "The managed lifecycle receipt does not prove embedded-Python loadability.",
+            )
+        runtime["qrenderdoc_python_probe"] = "loaded"
+    elif not allow_manual_unverified and not manual_probe_already_verified:
+        _probe_manual_embedded_python(qrenderdoc)
+        runtime["qrenderdoc_python_probe"] = "loaded"
     return {
         "command": str(command),
         "qrenderdoc": str(qrenderdoc),
@@ -589,6 +633,31 @@ def _restore_uninstall(
     return failures
 
 
+def _uninstall_error(
+    exc: OSError,
+    *,
+    cleanup: bool = False,
+) -> LifecycleError:
+    restart = sys.platform == "win32" and isinstance(exc, PermissionError)
+    if cleanup:
+        return LifecycleError(
+            INSTALL_EXIT_REQUIRES_RESTART if restart else INSTALL_EXIT_INSTALL,
+            "cleanup",
+            "cleanup_requires_restart" if restart else "cleanup_incomplete",
+            (
+                "Uninstall completed, but rollback-copy cleanup is locked and requires a restart."
+                if restart
+                else "Uninstall completed, but its rollback copy could not be removed."
+            ),
+        )
+    return LifecycleError(
+        INSTALL_EXIT_REQUIRES_RESTART if restart else INSTALL_EXIT_INSTALL,
+        "uninstall",
+        "runtime_locked" if restart else "uninstall_failed",
+        "Uninstall failed; the prior runtime and receipt remain active.",
+    )
+
+
 def _handle_uninstall(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     receipt_path = _receipt_path(args.receipt_path)
     report = _base_report(args.operation, receipt_path)
@@ -598,7 +667,7 @@ def _handle_uninstall(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             report.update({"status": "ok", "install_state": "fresh"})
             report["steps"] = [{"id": "uninstall", "status": "skipped"}]
             return report, INSTALL_EXIT_OK
-        details = _verify_receipt(args, receipt)
+        details = _verify_receipt(args, receipt, allow_manual_unverified=True)
         report["steps"] = [
             {"id": "receipt", "status": "ok"},
             {"id": "remove", "status": "planned"},
@@ -618,26 +687,40 @@ def _handle_uninstall(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         receipt_backup = receipt_path.with_name(f".{receipt_path.name}.uninstall-{token}")
         destination_text = details.get("managed_destination")
         if destination_text is None:
-            os.replace(receipt_path, receipt_backup)
             try:
+                os.replace(receipt_path, receipt_backup)
                 receipt_backup.unlink()
             except OSError as exc:
-                os.replace(receipt_backup, receipt_path)
-                raise LifecycleError(
-                    INSTALL_EXIT_INSTALL,
-                    "uninstall",
-                    "receipt_remove_failed",
-                    "Could not remove the manual-runtime receipt; it was restored.",
-                ) from exc
+                try:
+                    if receipt_backup.exists() and not receipt_path.exists():
+                        os.replace(receipt_backup, receipt_path)
+                except OSError as rollback_exc:
+                    raise LifecycleError(
+                        INSTALL_EXIT_INSTALL,
+                        "rollback",
+                        "rollback_failed",
+                        "Manual-runtime receipt removal failed and its receipt could not "
+                        "be restored.",
+                    ) from rollback_exc
+                raise _uninstall_error(exc) from exc
         else:
             destination = Path(destination_text)
             tombstone = destination.with_name(f".{destination.name}.uninstall-{token}")
             restore_copy = destination.with_name(f".{destination.name}.restore-{token}")
-            shutil.copytree(destination, restore_copy)
+            try:
+                shutil.copytree(destination, restore_copy)
+            except OSError as exc:
+                if restore_copy.exists():
+                    try:
+                        shutil.rmtree(restore_copy, ignore_errors=True)
+                    except OSError:
+                        pass
+                raise _uninstall_error(exc) from exc
             try:
                 os.replace(destination, tombstone)
                 os.replace(receipt_path, receipt_backup)
                 shutil.rmtree(tombstone)
+                receipt_backup.unlink(missing_ok=True)
             except OSError as exc:
                 failures = _restore_uninstall(
                     destination,
@@ -654,25 +737,18 @@ def _handle_uninstall(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                         "Uninstall failed and the prior managed runtime could not be "
                         "fully restored.",
                     ) from exc
-                code = (
-                    INSTALL_EXIT_REQUIRES_RESTART
-                    if os.name == "nt" and isinstance(exc, PermissionError)
-                    else INSTALL_EXIT_INSTALL
-                )
-                raise LifecycleError(
-                    code,
-                    "uninstall",
-                    "runtime_locked"
-                    if code == INSTALL_EXIT_REQUIRES_RESTART
-                    else "uninstall_failed",
-                    "Uninstall failed; the prior managed runtime and receipt were restored.",
-                ) from exc
+                raise _uninstall_error(exc) from exc
             finally:
                 if tombstone.exists():
-                    shutil.rmtree(tombstone, ignore_errors=True)
-            receipt_backup.unlink(missing_ok=True)
+                    try:
+                        shutil.rmtree(tombstone, ignore_errors=True)
+                    except OSError:
+                        pass
             if restore_copy.exists():
-                shutil.rmtree(restore_copy)
+                try:
+                    shutil.rmtree(restore_copy)
+                except OSError as exc:
+                    raise _uninstall_error(exc, cleanup=True) from exc
         report["steps"][1]["status"] = "ok"
         report.update({"status": "ok", "install_state": "fresh"})
         return report, INSTALL_EXIT_OK
@@ -782,6 +858,10 @@ def _handle_install(args: argparse.Namespace, *, upgrade: bool) -> tuple[dict[st
         managed_cache_receipt: Optional[dict[str, Any]] = None
         if managed:
             managed_destination, managed_cache_receipt = _managed_receipt(command)
+            runtime["qrenderdoc_python_probe"] = "loaded"
+        elif args.yes and not args.dry_run:
+            _probe_manual_embedded_python(qrenderdoc)
+            runtime["qrenderdoc_python_probe"] = "loaded"
         state = "upgrade" if upgrade else ("current" if receipt_path.is_file() else "fresh")
         report.update(
             {
@@ -908,7 +988,11 @@ def _handle_install(args: argparse.Namespace, *, upgrade: bool) -> tuple[dict[st
                 "could not be written.",
             ) from exc
         try:
-            report["verification"] = _verify_receipt(args, receipt)
+            report["verification"] = _verify_receipt(
+                args,
+                receipt,
+                manual_probe_already_verified=not managed,
+            )
         except LifecycleError as verify_exc:
             try:
                 if previous_receipt_bytes is None:
