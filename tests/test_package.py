@@ -1,17 +1,80 @@
+import csv
+import io
+import json
+import os
 import re
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from dcc_mcp_renderdoc import __version__
+
+
+def _windows_adb_pids() -> set[int]:
+    if sys.platform != "win32":
+        return set()
+    completed = subprocess.run(
+        ["tasklist.exe", "/FI", "IMAGENAME eq adb.exe", "/FO", "CSV", "/NH"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    pids = set()
+    for row in csv.reader(io.StringIO(completed.stdout)):
+        if len(row) >= 2 and row[0].casefold() == "adb.exe":
+            pids.add(int(row[1]))
+    return pids
+
+
+def test_server_constructs_with_headless_contract(tmp_path):
+    registry = tmp_path / "child-registry"
+    env = os.environ.copy()
+    env["DCC_MCP_GATEWAY_PORT"] = "0"
+    env["DCC_MCP_REGISTRY_DIR"] = str(registry)
+    source_root = Path(__file__).parents[1] / "src"
+    env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(source_root), env.get("PYTHONPATH")) if value
+    )
+    script = """
+import json
 from dcc_mcp_renderdoc.server import RenderDocMcpServer
+server = RenderDocMcpServer(port=0)
+try:
+    print(json.dumps({
+        "server_name": server._options.server_name,
+        "dcc_name": server._options.dcc_name,
+    }))
+finally:
+    server.stop()
+"""
+    adb_before = _windows_adb_pids()
 
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=env,
+    )
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-def test_server_constructs_with_headless_contract():
-    server = RenderDocMcpServer(port=0)
-    try:
-        assert server._options.server_name == "dcc-mcp-renderdoc"
-        assert server._options.dcc_name == "renderdoc"
-    finally:
-        server.stop()
+    assert payload == {
+        "server_name": "dcc-mcp-renderdoc",
+        "dcc_name": "renderdoc",
+    }
+    assert env["DCC_MCP_GATEWAY_PORT"] == "0"
+    assert env["DCC_MCP_REGISTRY_DIR"] == str(registry)
+
+    if sys.platform == "win32":
+        new_adb = _windows_adb_pids() - adb_before
+        deadline = time.monotonic() + 2
+        while new_adb and time.monotonic() < deadline:
+            time.sleep(0.1)
+            new_adb = _windows_adb_pids() - adb_before
+        assert not new_adb, f"server probe leaked adb.exe process(es): {sorted(new_adb)}"
 
 
 def test_bundled_skills_and_release_workflow_exist():
