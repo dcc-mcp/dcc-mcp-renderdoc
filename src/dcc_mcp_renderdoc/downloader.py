@@ -336,8 +336,10 @@ def _warm_qrenderdoc_python(qrenderdoc: Path) -> None:
         argv = [str(shutil.which("xvfb-run")), "-a", *argv]
     with tempfile.TemporaryDirectory(prefix="dcc-mcp-renderdoc-probe-") as directory:
         root = Path(directory)
+        status_path = root / "status.txt"
         environment = os.environ.copy()
         environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        environment["DCC_MCP_RENDERDOC_PROBE_STATUS"] = str(status_path)
         if sys.platform.startswith("linux"):
             config_root = root / "xdg-data"
             environment["XDG_DATA_HOME"] = str(config_root)
@@ -368,10 +370,11 @@ def _warm_qrenderdoc_python(qrenderdoc: Path) -> None:
             raise RuntimeError(
                 f"qrenderdoc embedded-Python probe failed: {type(exc).__name__}"
             ) from exc
-    output = "\n".join(
-        part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip()
-    )
-    if completed.returncode != 0 or QRENDERDOC_PYTHON_PROBE_MARKER not in output:
+        try:
+            marker = status_path.read_text(encoding="utf-8")
+        except OSError:
+            marker = ""
+    if completed.returncode != 0 or marker != QRENDERDOC_PYTHON_PROBE_MARKER:
         raise RuntimeError(
             "qrenderdoc embedded-Python probe failed without a valid completion marker"
         )
