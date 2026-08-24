@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 import uuid
 import zipfile
@@ -22,6 +23,7 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 25_000
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+QRENDERDOC_PYTHON_PROBE_MARKER = "dcc-mcp-renderdoc-python-probe-ok"
 
 
 @dataclass(frozen=True)
@@ -320,6 +322,61 @@ def probe_runtime(command: Path, *, expected_version: str | None = None) -> dict
     }
 
 
+def _warm_qrenderdoc_python(qrenderdoc: Path) -> None:
+    """Load the managed embedded Python before its generated files are receipted."""
+    script = Path(__file__).with_name("_runtime_probe.py")
+    if not script.is_file():
+        raise RuntimeError("qrenderdoc embedded-Python probe helper is missing")
+    argv = [str(qrenderdoc), "--python", str(script)]
+    if (
+        sys.platform.startswith("linux")
+        and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        and shutil.which("xvfb-run")
+    ):
+        argv = [str(shutil.which("xvfb-run")), "-a", *argv]
+    with tempfile.TemporaryDirectory(prefix="dcc-mcp-renderdoc-probe-") as directory:
+        root = Path(directory)
+        environment = os.environ.copy()
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        if sys.platform.startswith("linux"):
+            config_root = root / "xdg-data"
+            environment["XDG_DATA_HOME"] = str(config_root)
+        elif sys.platform == "win32":
+            config_root = root / "appdata-roaming"
+            environment["APPDATA"] = str(config_root)
+            environment["LOCALAPPDATA"] = str(root / "appdata-local")
+        else:
+            config_root = None
+        if config_root is not None:
+            config_directory = config_root / "qrenderdoc"
+            config_directory.mkdir(parents=True)
+            (config_directory / "UI.config").write_text(
+                json.dumps({"Analytics_TotalOptOut": True, "rdocConfigData": 1}),
+                encoding="utf-8",
+            )
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=False,
+                env=environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(
+                f"qrenderdoc embedded-Python probe failed: {type(exc).__name__}"
+            ) from exc
+    output = "\n".join(
+        part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip()
+    )
+    if completed.returncode != 0 or QRENDERDOC_PYTHON_PROBE_MARKER not in output:
+        raise RuntimeError(
+            "qrenderdoc embedded-Python probe failed without a valid completion marker"
+        )
+
+
 def _owned_files(root: Path) -> dict[str, str]:
     receipt_name = ".dcc-mcp-renderdoc.json"
     files: dict[str, str] = {}
@@ -475,6 +532,7 @@ def download_pinned(bundle: RenderDocBundle | None = None) -> Path:
             command.chmod(command.stat().st_mode | 0o111)
             qrenderdoc.chmod(qrenderdoc.stat().st_mode | 0o111)
         probe = probe_runtime(command, expected_version=selected.version)
+        _warm_qrenderdoc_python(qrenderdoc)
         command_relative = command.relative_to(staging).as_posix()
         qrenderdoc_relative = qrenderdoc.relative_to(staging).as_posix()
         receipt = {

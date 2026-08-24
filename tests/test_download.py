@@ -222,16 +222,22 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         "urlopen",
         lambda *_args, **_kwargs: io.BytesIO(archive),
     )
-    monkeypatch.setattr(
-        runtime_downloader.subprocess,
-        "run",
-        lambda args, **_kwargs: subprocess.CompletedProcess(
-            args,
-            0,
-            "qrenderdoc v1.45" if "qrenderdoc" in str(args[0]) else "renderdoccmd v1.45",
-            "",
-        ),
-    )
+    probes = []
+
+    def run_probe(args, **_kwargs):
+        probes.append(args)
+        if "--python" in args:
+            python_cache = (
+                Path(args[0]).parents[1]
+                / "share/renderdoc/pylibs/lib/python3.6/__pycache__/json.cpython-36.pyc"
+            )
+            python_cache.parent.mkdir(parents=True)
+            python_cache.write_bytes(b"managed-bytecode")
+            return subprocess.CompletedProcess(args, 0, "dcc-mcp-renderdoc-python-probe-ok\n", "")
+        output = "qrenderdoc v1.45" if "qrenderdoc" in str(args[0]) else "renderdoccmd v1.45"
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(runtime_downloader.subprocess, "run", run_probe)
 
     installed = runtime_downloader.download_pinned()
     receipt = json.loads((installed.parents[2] / ".dcc-mcp-renderdoc.json").read_text())
@@ -241,7 +247,11 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
     assert receipt["files"] == {
         "renderdoc_1.45/bin/qrenderdoc": hashlib.sha256(qrenderdoc_bytes).hexdigest(),
         "renderdoc_1.45/bin/renderdoccmd": hashlib.sha256(command_bytes).hexdigest(),
+        "renderdoc_1.45/share/renderdoc/pylibs/lib/python3.6/__pycache__/json.cpython-36.pyc": (
+            hashlib.sha256(b"managed-bytecode").hexdigest()
+        ),
     }
+    assert any(Path(arguments[-1]).name == "_runtime_probe.py" for arguments in probes)
     assert receipt["qrenderdoc"] == "renderdoc_1.45/bin/qrenderdoc"
     assert old_managed.is_dir()
     assert unmanaged.is_dir()
@@ -261,7 +271,7 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
         runtime_downloader.download_pinned()
 
 
-def test_failed_qrenderdoc_probe_preserves_prior_managed_version(monkeypatch, tmp_path):
+def test_failed_qrenderdoc_python_probe_preserves_prior_managed_version(monkeypatch, tmp_path):
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w:gz") as bundle:
         for relative in ("renderdoc_1.45/bin/renderdoccmd", "renderdoc_1.45/bin/qrenderdoc"):
@@ -302,13 +312,17 @@ def test_failed_qrenderdoc_probe_preserves_prior_managed_version(monkeypatch, tm
         "run",
         lambda args, **_kwargs: subprocess.CompletedProcess(
             args,
-            1 if any(Path(argument).name == "qrenderdoc" for argument in args) else 0,
-            "renderdoccmd v1.45",
-            "qrenderdoc failed",
+            1 if "--python" in args else 0,
+            (
+                "qrenderdoc v1.45"
+                if any(Path(argument).name == "qrenderdoc" for argument in args)
+                else "renderdoccmd v1.45"
+            ),
+            "embedded Python failed" if "--python" in args else "",
         ),
     )
 
-    with pytest.raises(RuntimeError, match="qrenderdoc.*probe"):
+    with pytest.raises(RuntimeError, match="qrenderdoc embedded-Python probe"):
         runtime_downloader.download_pinned()
 
     assert old_managed.is_dir()
