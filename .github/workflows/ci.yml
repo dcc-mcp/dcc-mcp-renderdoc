@@ -127,7 +127,12 @@ jobs:
       - name: Receipt-driven uninstall and idempotence
         shell: bash
         run: |
+          set +e
           python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --dry-run > uninstall-plan.json
+          uninstall_plan_status=$?
+          cat uninstall-plan.json
+          set -e
+          test "$uninstall_plan_status" -eq 0
           python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --yes > uninstall.json
           python -m dcc_mcp_renderdoc uninstall --python "$(command -v python)" --json --yes > uninstall-again.json
           python -c 'import json; from jsonschema import Draft202012Validator; from dcc_mcp_renderdoc.install_contract import load_install_sop_schema; v=Draft202012Validator(load_install_sop_schema()); [v.validate(json.load(open(p))) for p in ("uninstall-plan.json","uninstall.json","uninstall-again.json")]'
