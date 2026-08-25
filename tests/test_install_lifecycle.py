@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
+import importlib.resources
 import json
+import runpy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,18 +37,37 @@ class _FakeDistribution:
         return None
 
 
-def test_compatibility_schema_matches_core_2320_canonical_contract():
-    from dcc_mcp_renderdoc.install_contract import load_install_sop_schema
+def test_install_contract_fails_closed_without_official_core(monkeypatch):
+    contract_path = Path(__file__).parents[1] / "src" / "dcc_mcp_renderdoc" / "install_contract.py"
+    real_import = builtins.__import__
 
-    canonical = json.dumps(
-        load_install_sop_schema(),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    def reject_core(name, *args, **kwargs):
+        if name == "dcc_mcp_core" or name.startswith("dcc_mcp_core."):
+            raise ModuleNotFoundError("dcc_mcp_core is unavailable")
+        return real_import(name, *args, **kwargs)
 
-    assert hashlib.sha256(canonical).hexdigest() == (
-        "c0bcb6f8fa7228d43a4b4c6d20d7e4618a21c09eb6b2d3c2018ee56f647fccc1"
+    monkeypatch.setattr(builtins, "__import__", reject_core)
+
+    with pytest.raises(ModuleNotFoundError, match="dcc_mcp_core is unavailable"):
+        runpy.run_path(str(contract_path))
+
+
+def test_install_contract_uses_official_core_loader_and_resource():
+    from dcc_mcp_core import deployment
+
+    from dcc_mcp_renderdoc import install_contract
+
+    assert install_contract.load_install_sop_schema is deployment.load_install_sop_schema
+    schema_bytes = (
+        importlib.resources.files("dcc_mcp_core")
+        .joinpath("schemas", "adapter-install-sop-v1.schema.json")
+        .read_bytes()
     )
+    assert len(schema_bytes) == 4261
+    assert hashlib.sha256(schema_bytes).hexdigest() == (
+        "3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904"
+    )
+    Draft202012Validator.check_schema(install_contract.load_install_sop_schema())
 
 
 def test_current_target_python_probe_reuses_proven_import_context(monkeypatch, tmp_path):
@@ -70,7 +92,7 @@ def test_current_target_python_probe_reuses_proven_import_context(monkeypatch, t
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
         "version",
-        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.0",
+        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.14",
     )
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
@@ -88,7 +110,7 @@ def test_current_target_python_probe_reuses_proven_import_context(monkeypatch, t
     result = lifecycle._probe_python(Path(sys.executable))
 
     assert result["python"] == str(Path(sys.executable).resolve())
-    assert result["core_version"] == "0.20.0"
+    assert result["core_version"] == "0.20.14"
     assert result["resolution_source"] == "argument"
     assert imported == ["dcc_mcp_renderdoc", "dcc_mcp_core"]
 
@@ -104,7 +126,7 @@ def test_cross_target_python_rejects_missing_or_mismatched_adapter(
     payload = {
         "python": str(python),
         "python_version": "3.12.0",
-        "core_version": "0.20.0",
+        "core_version": "0.20.14",
         "adapter_module_version": "0.0.1",
         "adapter_module_origin": str(tmp_path / "shadow/dcc_mcp_renderdoc/__init__.py"),
         "adapter_distribution_root": str(tmp_path / "site-packages"),
@@ -145,7 +167,7 @@ def test_cross_target_python_accepts_exact_adapter(monkeypatch, tmp_path):
         "adapter_module_origin": str(module_origin),
         "adapter_distribution_root": str(distribution_root),
         "adapter_direct_url": None,
-        "core_version": "0.20.0",
+        "core_version": "0.20.14",
     }
     monkeypatch.setattr(
         lifecycle.subprocess,
@@ -187,7 +209,7 @@ def test_cross_target_python_rejects_shadow_or_module_mismatch(monkeypatch, tmp_
         ),
         "adapter_distribution_root": str(distribution_root),
         "adapter_direct_url": None,
-        "core_version": "0.20.0",
+        "core_version": "0.20.14",
     }
     monkeypatch.setattr(
         lifecycle.subprocess,
@@ -235,7 +257,7 @@ def test_current_target_python_rejects_shadow_or_module_mismatch(
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
         "version",
-        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.0",
+        lambda name: lifecycle.__version__ if name == "dcc-mcp-renderdoc" else "0.20.14",
     )
     monkeypatch.setattr(
         lifecycle.importlib.metadata,
@@ -329,7 +351,7 @@ def test_doctor_version_only_pair_requires_embedded_python_marker(monkeypatch, c
     command.write_bytes(b"renderdoc")
     command.with_name("qrenderdoc.exe").write_bytes(b"qrenderdoc")
     monkeypatch.setattr(diagnostics.sys, "platform", "win32")
-    monkeypatch.setattr(diagnostics, "_core_version", lambda: "0.20.0")
+    monkeypatch.setattr(diagnostics, "_core_version", lambda: "0.20.14")
     monkeypatch.setattr(
         diagnostics,
         "probe_runtime",

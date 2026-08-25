@@ -3,7 +3,7 @@
 ## Requirements
 
 - Python 3.9 or newer.
-- `dcc-mcp-core` 0.19.45 or newer in the selected Python environment.
+- `dcc-mcp-core` 0.20.14 or newer in the selected Python environment.
 - RenderDoc 1.20 or newer, with a matching `renderdoccmd` and `qrenderdoc` pair.
 - A loopback connection to the shared DCC-MCP gateway for MCP clients.
 
@@ -22,7 +22,7 @@ therefore cannot report a directly usable RenderDoc runtime on macOS.
 | Component | Supported floor |
 | --- | --- |
 | Python | 3.9 |
-| dcc-mcp-core | 0.19.45 |
+| dcc-mcp-core | 0.20.14 |
 | RenderDoc | 1.20 |
 
 The wheel contains immutable URL and SHA-256 pins for RenderDoc 1.45 on Windows x64 and Linux

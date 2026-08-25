@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 from dcc_mcp_renderdoc import __version__
@@ -93,6 +94,32 @@ def test_runtime_version_matches_distribution_metadata():
     )
     assert locked_project is not None
     assert __version__ == locked_project.group(1)
+
+
+def test_wheel_omits_compatibility_schema_tests_and_fixtures(tmp_path):
+    root = Path(__file__).parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(tmp_path),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    wheel = next(tmp_path.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+
+    assert "dcc_mcp_renderdoc/schemas/adapter-install-sop-v1.schema.json" not in names
+    assert not any(name.startswith("tests/") for name in names)
+    assert not any("fixture" in name.casefold() for name in names)
 
 
 def test_start_server_defers_port_resolution_to_core(monkeypatch):
