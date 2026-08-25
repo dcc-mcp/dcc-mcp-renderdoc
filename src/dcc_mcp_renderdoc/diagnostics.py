@@ -18,7 +18,7 @@ from .downloader import (
     probe_runtime,
 )
 
-MIN_CORE_VERSION = "0.19.45"
+MIN_CORE_VERSION = "0.20.14"
 MIN_RENDERDOC_VERSION = "1.20"
 PREFLIGHT_EXIT = 10
 VERIFY_EXIT = 40

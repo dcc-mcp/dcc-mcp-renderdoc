@@ -5,7 +5,7 @@ description: >-
   capture. Use for repeatable local or CI frame capture. Not for reading an existing capture —
   use renderdoc-analysis.
 license: MIT
-compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.19+"
+compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.20.14+"
 allowed-tools: "python"
 metadata:
   dcc-mcp:
