@@ -24,7 +24,13 @@ def _descendant(pid_path: str, ready_path: str) -> None:
         time.sleep(0.05)
 
 
-def _root(root_pid_path: str, descendant_pid_path: str, ready_path: str) -> None:
+def _root(
+    root_pid_path: str,
+    descendant_pid_path: str,
+    ready_path: str,
+    *,
+    exit_after_ready: bool,
+) -> None:
     _write(root_pid_path, str(os.getpid()))
     subprocess.Popen(
         [
@@ -36,6 +42,13 @@ def _root(root_pid_path: str, descendant_pid_path: str, ready_path: str) -> None
         ],
         stdin=subprocess.DEVNULL,
     )
+    if exit_after_ready:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if Path(ready_path).is_file():
+                return
+            time.sleep(0.01)
+        raise RuntimeError("descendant did not become ready")
     while True:
         time.sleep(0.05)
 
@@ -44,7 +57,12 @@ def main() -> None:
     if sys.argv[1] == "descendant":
         _descendant(sys.argv[2], sys.argv[3])
         return
-    _root(sys.argv[1], sys.argv[2], sys.argv[3])
+    _root(
+        sys.argv[1],
+        sys.argv[2],
+        sys.argv[3],
+        exit_after_ready=len(sys.argv) > 4 and sys.argv[4] == "root-exit",
+    )
 
 
 if __name__ == "__main__":

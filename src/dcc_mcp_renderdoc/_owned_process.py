@@ -82,13 +82,40 @@ class _PosixProcessGroup:
     """Own one new session so exact descendants cannot outlive the probe."""
 
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
         self.process_group = process.pid
 
+    def leader_exited(self) -> bool:
+        """Observe exit without reaping so the numeric group cannot be recycled."""
+        if self.process.returncode is not None:
+            raise OwnedProcessError("probe process identity was reaped before tree cleanup")
+        try:
+            result = os.waitid(
+                os.P_PID,
+                self.process.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+        except ChildProcessError as exc:
+            raise OwnedProcessError("probe process identity was lost before tree cleanup") from exc
+        return result is not None
+
     def terminate(self, *, force: bool = False) -> None:
+        if self.process.returncode is not None:
+            raise OwnedProcessError("refusing to signal a reaped probe process group")
         try:
             os.killpg(self.process_group, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+    def wait_without_reaping(self, deadline: float) -> bool:
+        while time.monotonic() < deadline:
+            if self.leader_exited():
+                return True
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        return self.leader_exited()
+
+    def reap(self, deadline: float) -> None:
+        _wait_for_exit(self.process, deadline)
 
     def close(self) -> None:
         return
@@ -317,7 +344,10 @@ def run_owned_process(
         stdout_collector.start()
         stderr_collector.start()
         deadline = started + timeout
-        while process.poll() is None:
+        while True:
+            exited = process.poll() is not None if os.name == "nt" else owner.leader_exited()
+            if exited:
+                break
             try:
                 check_dcc_cancelled()
             except BaseException as exc:
@@ -335,18 +365,26 @@ def run_owned_process(
     stdout_truncated = False
     stderr_truncated = False
     try:
-        if owner is not None:
+        if os.name != "nt" and isinstance(owner, _PosixProcessGroup):
             owner.terminate()
-        if process is not None and process.poll() is None:
-            try:
-                process.wait(timeout=min(1.0, max(0.0, cleanup_deadline - time.monotonic())))
-            except subprocess.TimeoutExpired:
-                if owner is not None:
-                    owner.terminate(force=True)
-                process.kill()
-                _wait_for_exit(process, cleanup_deadline)
-        if owner is not None:
+            grace_deadline = min(cleanup_deadline, time.monotonic() + 1.0)
+            owner.wait_without_reaping(grace_deadline)
             owner.terminate(force=True)
+            owner.wait_without_reaping(cleanup_deadline)
+            owner.reap(cleanup_deadline)
+        else:
+            if owner is not None:
+                owner.terminate()
+            if process is not None and process.poll() is None:
+                try:
+                    process.wait(timeout=min(1.0, max(0.0, cleanup_deadline - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    if owner is not None:
+                        owner.terminate(force=True)
+                    process.kill()
+                    _wait_for_exit(process, cleanup_deadline)
+            if owner is not None:
+                owner.terminate(force=True)
         if stdout_collector is not None:
             stdout, stdout_truncated = stdout_collector.finish(cleanup_deadline)
         if stderr_collector is not None:
