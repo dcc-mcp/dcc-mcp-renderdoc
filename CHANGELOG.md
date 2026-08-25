@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.5.0...v0.5.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* bind POSIX probe process identities ([3d0ca60](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3d0ca60e168771f53065ec3970ff74dce19f41b2))
+* bind RenderDoc imported module identity ([cc80af9](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/cc80af9c1804ea570d4e7e6ebec412f09b5fc3e1))
+* bind RenderDoc target adapter version ([1d216a2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1d216a23a6895fbb4d7a9ffedb26d71f2c3681e8))
+* bind RenderDoc warm probe status ([e699a22](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e699a2238283e858760edd95cd4ead4344b7b630))
+* harden RenderDoc install lifecycle ([46ca9fc](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/46ca9fc0b16deb17149a16621961993af81c85a5))
+* harden RenderDoc lifecycle transactions ([a3b7e75](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a3b7e75f8df45666344de0ecc2fcf71f04bcfd87))
+* keep RenderDoc runtime cache immutable ([585b9b6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/585b9b6ea45134703cc692a9cd61ca1a51896b55))
+* receipt RenderDoc runtime caches ([3a54c72](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3a54c72172d04e99ded36eb99b76331d8ad9e44a))
+* report managed runtime drift ([e628a72](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e628a728ece69e6d8dc4219b37498f7b9f674c77))
+* secure RenderDoc install lifecycle ([81102b6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/81102b62629a47af18c5d0e4c29f1761ab766a76))
+* supervise POSIX probe process groups ([ab2c0de](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ab2c0de10d3b67ccff181835d194aa82cb966b5b))
+* terminate RenderDoc probe process trees ([dfec46a](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dfec46a304b2dd8b48a0bf0ee96504447dda8321))
+* use published Core install contract ([a5f99ca](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a5f99ca707c549e63de3ce48b783ff8b58703368))
+* verify RenderDoc managed provenance ([07906b0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/07906b0f5099f434064dd08fb79274e01573ade8))
+
 ## [0.5.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.4.0...v0.5.0) (2026-07-29)
 
 
