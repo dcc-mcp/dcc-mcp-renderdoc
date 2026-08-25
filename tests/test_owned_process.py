@@ -195,3 +195,62 @@ def test_successful_probe_capture_is_bounded_and_drained() -> None:
     assert len(result.stderr.encode("utf-8")) == _owned_process._MAX_CAPTURE_BYTES
     assert result.stdout_truncated is True
     assert result.stderr_truncated is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group identity regression")
+def test_posix_never_signals_a_reaped_session_leader_numeric_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_killpg = os.killpg
+    safe_signals = []
+    unsafe_signals = []
+
+    def identity_checked_killpg(process_group: int, sig: int) -> None:
+        try:
+            identity = os.waitid(
+                os.P_PID,
+                process_group,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+        except ChildProcessError:
+            unsafe_signals.append((process_group, sig))
+            return
+        assert identity is not None
+        safe_signals.append((process_group, sig))
+        real_killpg(process_group, sig)
+
+    monkeypatch.setattr(os, "killpg", identity_checked_killpg)
+
+    result = run_owned_process([sys.executable, "-c", "pass"], timeout_secs=5.0)
+
+    assert result.returncode == 0
+    assert unsafe_signals == []
+    assert safe_signals
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX root-first process-tree regression")
+def test_posix_root_first_exit_still_kills_inherited_pipe_descendant(
+    tmp_path: Path,
+) -> None:
+    root_pid = tmp_path / "root.pid"
+    descendant_pid = tmp_path / "descendant.pid"
+    ready = tmp_path / "descendant.ready"
+    command = [
+        sys.executable,
+        str(PROCESS_TREE_HELPER),
+        str(root_pid),
+        str(descendant_pid),
+        str(ready),
+        "root-exit",
+    ]
+    started = time.monotonic()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_owned_process, command, timeout_secs=5.0)
+        _wait_for_ready(future, ready)
+        descendant_identity = _ProcessIdentity(int(descendant_pid.read_text(encoding="ascii")))
+        result = future.result(timeout=6)
+
+    assert result.returncode == 0
+    assert time.monotonic() - started < 6
+    _assert_tree_dead([descendant_identity])
