@@ -197,7 +197,23 @@ def test_successful_probe_capture_is_bounded_and_drained() -> None:
     assert result.stderr_truncated is True
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group identity regression")
+def test_unstartable_probe_fails_closed_without_exposing_argv(tmp_path: Path) -> None:
+    missing = tmp_path / "private-missing-probe"
+
+    with pytest.raises(
+        _owned_process.OwnedProcessError,
+        match="^probe process could not be started safely$",
+    ) as error:
+        run_owned_process([str(missing), "private-argument"], timeout_secs=2.0)
+
+    assert str(missing) not in str(error.value)
+    assert "private-argument" not in str(error.value)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "waitid"),
+    reason="waitid identity oracle is unavailable",
+)
 def test_posix_never_signals_a_reaped_session_leader_numeric_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -215,8 +231,7 @@ def test_posix_never_signals_a_reaped_session_leader_numeric_group(
         except ChildProcessError:
             unsafe_signals.append((process_group, sig))
             return
-        assert identity is not None
-        safe_signals.append((process_group, sig))
+        safe_signals.append((process_group, sig, identity is not None))
         real_killpg(process_group, sig)
 
     monkeypatch.setattr(os, "killpg", identity_checked_killpg)
@@ -226,6 +241,7 @@ def test_posix_never_signals_a_reaped_session_leader_numeric_group(
     assert result.returncode == 0
     assert unsafe_signals == []
     assert safe_signals
+    assert all(not leader_exited for _, _, leader_exited in safe_signals)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX root-first process-tree regression")

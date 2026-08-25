@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -14,6 +16,34 @@ from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
 _MAX_CAPTURE_BYTES = 128 * 1024
 _PROCESS_CLEANUP_SECS = 3.0
+_POSIX_SUPERVISOR = r"""
+import os
+import signal
+import subprocess
+import sys
+
+status_fd = int(sys.argv[1])
+command = sys.argv[2:]
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+def restore_sigterm():
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+try:
+    child = subprocess.Popen(command, preexec_fn=restore_sigterm)
+except BaseException:
+    payload = b"E\n"
+else:
+    payload = ("R%d\n" % child.wait()).encode("ascii")
+
+try:
+    os.write(status_fd, payload)
+finally:
+    os.close(status_fd)
+
+while True:
+    signal.pause()
+"""
 
 
 class OwnedProcessError(RuntimeError):
@@ -81,14 +111,88 @@ class _PipeCollector:
 class _PosixProcessGroup:
     """Own one new session so exact descendants cannot outlive the probe."""
 
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(self, process: subprocess.Popen[bytes], status_fd: int) -> None:
         self.process = process
         self.process_group = process.pid
+        self.status_fd: Optional[int] = status_fd
+        self.status_buffer = bytearray()
+        self.command_returncode: Optional[int] = None
+        self._exited = False
+        self._kqueue: Any = None
+        if not hasattr(os, "waitid"):
+            if not all(
+                hasattr(select, name)
+                for name in (
+                    "kqueue",
+                    "kevent",
+                    "KQ_FILTER_PROC",
+                    "KQ_EV_ADD",
+                    "KQ_EV_ERROR",
+                    "KQ_EV_ONESHOT",
+                    "KQ_NOTE_EXIT",
+                )
+            ):
+                raise OwnedProcessError("probe process identity watch is unavailable")
+            queue = select.kqueue()
+            try:
+                event = select.kevent(
+                    process.pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+                queue.control([event], 0, 0)
+            except BaseException:
+                queue.close()
+                raise
+            self._kqueue = queue
+
+    def read_command_returncode(self) -> Optional[int]:
+        if self.command_returncode is not None:
+            return self.command_returncode
+        if self.status_fd is None:
+            raise OwnedProcessError("probe process supervisor status was closed")
+        try:
+            chunk = os.read(self.status_fd, 64)
+        except BlockingIOError:
+            return None
+        if chunk:
+            self.status_buffer.extend(chunk)
+        if b"\n" not in self.status_buffer:
+            if not chunk:
+                raise OwnedProcessError("probe process supervisor returned no status")
+            return None
+        line, remainder = bytes(self.status_buffer).split(b"\n", 1)
+        if remainder or len(line) > 16:
+            raise OwnedProcessError("probe process supervisor returned an invalid status")
+        if line == b"E":
+            raise OwnedProcessError("probe process could not be started safely")
+        if not line.startswith(b"R"):
+            raise OwnedProcessError("probe process supervisor returned an invalid status")
+        try:
+            returncode = int(line[1:].decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise OwnedProcessError("probe process supervisor returned an invalid status") from exc
+        self.command_returncode = returncode
+        return returncode
 
     def leader_exited(self) -> bool:
         """Observe exit without reaping so the numeric group cannot be recycled."""
+        if self._exited:
+            return True
         if self.process.returncode is not None:
             raise OwnedProcessError("probe process identity was reaped before tree cleanup")
+        if self._kqueue is not None:
+            events = self._kqueue.control(None, 1, 0)
+            if not events:
+                return False
+            event = events[0]
+            if event.ident != self.process.pid or not (event.fflags & select.KQ_NOTE_EXIT):
+                raise OwnedProcessError("probe process identity watch returned an invalid event")
+            if event.flags & select.KQ_EV_ERROR:
+                raise OwnedProcessError("probe process identity watch failed")
+            self._exited = True
+            return True
         try:
             result = os.waitid(
                 os.P_PID,
@@ -97,7 +201,8 @@ class _PosixProcessGroup:
             )
         except ChildProcessError as exc:
             raise OwnedProcessError("probe process identity was lost before tree cleanup") from exc
-        return result is not None
+        self._exited = result is not None
+        return self._exited
 
     def terminate(self, *, force: bool = False) -> None:
         if self.process.returncode is not None:
@@ -118,7 +223,12 @@ class _PosixProcessGroup:
         _wait_for_exit(self.process, deadline)
 
     def close(self) -> None:
-        return
+        if self.status_fd is not None:
+            os.close(self.status_fd)
+            self.status_fd = None
+        if self._kqueue is not None:
+            self._kqueue.close()
+            self._kqueue = None
 
 
 class _WindowsJob:
@@ -306,6 +416,9 @@ def run_owned_process(
     stdout_collector: Optional[_PipeCollector] = None
     stderr_collector: Optional[_PipeCollector] = None
     pending: Optional[BaseException] = None
+    command_returncode: Optional[int] = None
+    status_read: Optional[int] = None
+    status_write: Optional[int] = None
     try:
         popen_kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -320,15 +433,37 @@ def run_owned_process(
         if os.name == "nt":
             owner = _WindowsJob()
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | 0x00000004
+            launch_command = [str(item) for item in command]
         else:
             popen_kwargs["start_new_session"] = True
+            status_read, status_write = os.pipe()
+            os.set_blocking(status_read, False)
+            popen_kwargs["pass_fds"] = (status_write,)
+            launch_command = [
+                sys.executable,
+                "-c",
+                _POSIX_SUPERVISOR,
+                str(status_write),
+                *(str(item) for item in command),
+            ]
         try:
-            process = subprocess.Popen([str(item) for item in command], **popen_kwargs)
+            process = subprocess.Popen(launch_command, **popen_kwargs)
+            if status_write is not None:
+                os.close(status_write)
+                status_write = None
             if os.name == "nt":
                 owner.assign_and_resume(process)
             else:
-                owner = _PosixProcessGroup(process)
+                assert status_read is not None
+                owner = _PosixProcessGroup(process, status_read)
+                status_read = None
         except BaseException as exc:
+            if status_write is not None:
+                os.close(status_write)
+                status_write = None
+            if status_read is not None:
+                os.close(status_read)
+                status_read = None
             if process is not None:
                 process.kill()
                 try:
@@ -345,7 +480,13 @@ def run_owned_process(
         stderr_collector.start()
         deadline = started + timeout
         while True:
-            exited = process.poll() is not None if os.name == "nt" else owner.leader_exited()
+            if os.name == "nt":
+                exited = process.poll() is not None
+            else:
+                command_returncode = owner.read_command_returncode()
+                exited = command_returncode is not None
+                if not exited and owner.leader_exited():
+                    raise OwnedProcessError("probe process supervisor exited unexpectedly")
             if exited:
                 break
             try:
@@ -357,6 +498,13 @@ def run_owned_process(
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     except BaseException as exc:
         pending = exc
+
+    if status_write is not None:
+        os.close(status_write)
+        status_write = None
+    if status_read is not None:
+        os.close(status_read)
+        status_read = None
 
     cleanup_deadline = time.monotonic() + _PROCESS_CLEANUP_SECS
     cleanup_error: Optional[BaseException] = None
@@ -403,8 +551,10 @@ def run_owned_process(
     if pending is not None:
         raise pending.with_traceback(pending.__traceback__)
     assert process is not None and process.returncode is not None
+    returncode = process.returncode if os.name == "nt" else command_returncode
+    assert returncode is not None
     return OwnedProcessResult(
-        returncode=int(process.returncode),
+        returncode=int(returncode),
         stdout=stdout,
         stderr=stderr,
         stdout_truncated=stdout_truncated,
