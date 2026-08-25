@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from dcc_mcp_renderdoc import downloader as runtime_downloader
+from dcc_mcp_renderdoc._owned_process import OwnedProcessResult, OwnedProcessTimeoutError
 
 
 class _Response(io.BytesIO):
@@ -255,11 +255,11 @@ def test_verified_download_replaces_only_superseded_managed_cache(monkeypatch, t
             Path(kwargs["env"]["DCC_MCP_RENDERDOC_PROBE_STATUS"]).write_text(
                 "dcc-mcp-renderdoc-python-probe-ok", encoding="utf-8"
             )
-            return subprocess.CompletedProcess(args, 0, "", "")
+            return OwnedProcessResult(0, "", "", False, False)
         output = "qrenderdoc v1.45" if "qrenderdoc" in str(args[0]) else "renderdoccmd v1.45"
-        return subprocess.CompletedProcess(args, 0, output, "")
+        return OwnedProcessResult(0, output, "", False, False)
 
-    monkeypatch.setattr(runtime_downloader.subprocess, "run", run_probe)
+    monkeypatch.setattr(runtime_downloader, "run_owned_process", run_probe)
 
     installed = runtime_downloader.download_pinned()
     receipt = json.loads((installed.parents[2] / ".dcc-mcp-renderdoc.json").read_text())
@@ -378,10 +378,9 @@ def test_failed_qrenderdoc_python_probe_preserves_prior_managed_version(monkeypa
         lambda *_args, **_kwargs: _Response(archive, url=url, content_length=len(archive)),
     )
     monkeypatch.setattr(
-        runtime_downloader.subprocess,
-        "run",
-        lambda args, **_kwargs: subprocess.CompletedProcess(
-            args,
+        runtime_downloader,
+        "run_owned_process",
+        lambda args, **_kwargs: OwnedProcessResult(
             1 if "--python" in args else 0,
             (
                 "qrenderdoc v1.45"
@@ -389,6 +388,8 @@ def test_failed_qrenderdoc_python_probe_preserves_prior_managed_version(monkeypa
                 else "renderdoccmd v1.45"
             ),
             "embedded Python failed" if "--python" in args else "",
+            False,
+            False,
         ),
     )
 
@@ -405,10 +406,83 @@ def test_runtime_probe_rejects_version_echo_scripts_before_execution(monkeypatch
     command.write_text("#!/bin/sh\necho renderdoccmd v1.45\n", encoding="utf-8")
     qrenderdoc.write_text("#!/bin/sh\necho qrenderdoc v1.45\n", encoding="utf-8")
     monkeypatch.setattr(
-        runtime_downloader.subprocess,
-        "run",
+        runtime_downloader,
+        "run_owned_process",
         lambda *_args, **_kwargs: pytest.fail("non-native placeholders must not execute"),
     )
 
     with pytest.raises(RuntimeError, match="not a native ELF binary"):
         runtime_downloader.probe_runtime(command)
+
+
+def test_runtime_version_probes_share_owned_process_runner(monkeypatch, tmp_path):
+    command = tmp_path / "renderdoccmd.exe"
+    qrenderdoc = tmp_path / "qrenderdoc.exe"
+    command.write_bytes(b"MZrenderdoccmd")
+    qrenderdoc.write_bytes(b"MZqrenderdoc")
+    calls = []
+
+    def owned_probe(argv, *, timeout_secs, env=None):
+        calls.append((tuple(argv), timeout_secs, env))
+        label = Path(argv[0]).stem
+        output = "{} v1.45".format(label)
+        return OwnedProcessResult(0, output, "", False, False)
+
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_downloader, "run_owned_process", owned_probe, raising=False)
+    result = runtime_downloader.probe_runtime(command, expected_version="1.45")
+
+    assert result["renderdoccmd_version"] == "1.45"
+    assert result["qrenderdoc_version"] == "1.45"
+    assert [Path(call[0][0]).name for call in calls] == ["renderdoccmd.exe", "qrenderdoc.exe"]
+    assert [call[1] for call in calls] == [15, 15]
+
+
+def test_embedded_python_probe_uses_owned_runner_and_status_marker(monkeypatch, tmp_path):
+    qrenderdoc = tmp_path / "qrenderdoc.exe"
+    qrenderdoc.write_bytes(b"MZqrenderdoc")
+    calls = []
+
+    def owned_probe(argv, *, timeout_secs, env=None):
+        calls.append((tuple(argv), timeout_secs, env))
+        Path(env["DCC_MCP_RENDERDOC_PROBE_STATUS"]).write_text(
+            runtime_downloader.QRENDERDOC_PYTHON_PROBE_MARKER,
+            encoding="utf-8",
+        )
+        return OwnedProcessResult(0, "", "", False, False)
+
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_downloader, "run_owned_process", owned_probe)
+
+    runtime_downloader.probe_qrenderdoc_python(qrenderdoc)
+
+    assert len(calls) == 1
+    assert calls[0][0][:2] == (str(qrenderdoc), "--python")
+    assert Path(calls[0][0][2]).name == "_runtime_probe.py"
+    assert calls[0][1] == 30
+    assert calls[0][2]["APPDATA"]
+    assert calls[0][2]["LOCALAPPDATA"]
+
+
+def test_owned_probe_timeout_errors_are_stable_and_sanitized(monkeypatch, tmp_path):
+    command = tmp_path / "operator-secret-renderdoccmd.exe"
+    qrenderdoc = command.with_name("qrenderdoc.exe")
+    command.write_bytes(b"MZrenderdoccmd")
+    qrenderdoc.write_bytes(b"MZqrenderdoc")
+    secret = str(tmp_path / "private-stderr.txt")
+
+    def timeout_probe(*_args, **_kwargs):
+        raise OwnedProcessTimeoutError("timeout while reading {}".format(secret))
+
+    monkeypatch.setattr(runtime_downloader.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_downloader, "run_owned_process", timeout_probe)
+
+    with pytest.raises(RuntimeError) as runtime_error:
+        runtime_downloader.probe_runtime(command)
+    with pytest.raises(RuntimeError) as python_error:
+        runtime_downloader.probe_qrenderdoc_python(qrenderdoc)
+
+    assert str(runtime_error.value) == "renderdoccmd probe failed: process_timeout"
+    assert str(python_error.value) == ("qrenderdoc embedded-Python probe failed: process_timeout")
+    assert secret not in str(runtime_error.value)
+    assert secret not in str(python_error.value)

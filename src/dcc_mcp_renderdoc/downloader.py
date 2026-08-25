@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -18,6 +17,13 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+
+from ._owned_process import (
+    OwnedProcessCancelledError,
+    OwnedProcessError,
+    OwnedProcessTimeoutError,
+    run_owned_process,
+)
 
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 25_000
@@ -260,6 +266,14 @@ def _require_native_executable(path: Path, label: str) -> None:
         raise RuntimeError(f"{label} probe failed: executable is not a native {expected} binary")
 
 
+def _owned_process_failure(exc: OwnedProcessError) -> str:
+    if isinstance(exc, OwnedProcessTimeoutError):
+        return "process_timeout"
+    if isinstance(exc, OwnedProcessCancelledError):
+        return "process_cancelled"
+    return "process_start_or_cleanup_failed"
+
+
 def probe_runtime(command: Path, *, expected_version: str | None = None) -> dict[str, str]:
     """Run bounded, read-only loadability probes for one paired RenderDoc runtime."""
     qrenderdoc_name = "qrenderdoc.exe" if command.name.casefold().endswith(".exe") else "qrenderdoc"
@@ -287,16 +301,9 @@ def probe_runtime(command: Path, *, expected_version: str | None = None) -> dict
         ("qrenderdoc", qrenderdoc_argv),
     ):
         try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                shell=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"{label} probe failed: {type(exc).__name__}") from exc
+            completed = run_owned_process(argv, timeout_secs=15)
+        except OwnedProcessError as exc:
+            raise RuntimeError(f"{label} probe failed: {_owned_process_failure(exc)}") from exc
         if completed.returncode != 0:
             raise RuntimeError(f"{label} probe failed with exit {completed.returncode}")
         output = "\n".join(
@@ -357,18 +364,10 @@ def probe_qrenderdoc_python(qrenderdoc: Path) -> None:
                 encoding="utf-8",
             )
         try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                shell=False,
-                env=environment,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            completed = run_owned_process(argv, timeout_secs=30, env=environment)
+        except OwnedProcessError as exc:
             raise RuntimeError(
-                f"qrenderdoc embedded-Python probe failed: {type(exc).__name__}"
+                "qrenderdoc embedded-Python probe failed: " + _owned_process_failure(exc)
             ) from exc
         try:
             marker = status_path.read_text(encoding="utf-8")
