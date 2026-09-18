@@ -205,12 +205,15 @@ def _action_summary(controller, rd, action, depth, parent_event_id):
     }
 
 
-def _walk_actions(controller, rd, actions, depth, max_depth, parent_event_id, collected, limit):
+def _walk_actions(controller, rd, actions, depth, max_depth, parent_event_id, visit):
+    """Walk the action tree in pre-order and hand every visited node to `visit`.
+
+    The walk is bounded by `max_depth` only: callers decide how many nodes they keep,
+    so filters can never hide matches that live deeper in the tree.
+    """
     for action in actions:
-        if len(collected) >= limit:
-            return
         summary = _action_summary(controller, rd, action, depth, parent_event_id)
-        collected.append(summary)
+        visit(summary)
         if depth + 1 <= max_depth:
             _walk_actions(
                 controller,
@@ -219,8 +222,7 @@ def _walk_actions(controller, rd, actions, depth, max_depth, parent_event_id, co
                 depth + 1,
                 max_depth,
                 summary["event_id"],
-                collected,
-                limit,
+                visit,
             )
 
 
@@ -318,22 +320,27 @@ def _op_list_actions(controller, rd, params, context):
         if parent is None:
             raise ValueError("event {} was not found".format(_int(parent_event_id)))
         roots = parent.children
-    collected = []
-    _walk_actions(controller, rd, roots, 0, max_depth, None, collected, offset + limit)
+    keep = offset + limit
     matched = []
-    for summary in collected:
+    counter = [0]
+
+    def visit(summary):
         if name_filter and name_filter not in summary["name"].casefold():
-            continue
+            return
         if flag_filter and flag_filter not in [name.casefold() for name in summary["flag_names"]]:
-            continue
-        matched.append(summary)
+            return
+        counter[0] += 1
+        if len(matched) < keep:
+            matched.append(summary)
+
+    _walk_actions(controller, rd, roots, 0, max_depth, None, visit)
     return {
         "parent_event_id": None if parent_event_id is None else _int(parent_event_id),
         "max_depth": max_depth,
         "offset": offset,
         "limit": limit,
-        "matched_count": len(matched),
-        "truncated": len(collected) >= offset + limit,
+        "matched_count": counter[0],
+        "truncated": counter[0] > keep,
         "actions": matched[offset : offset + limit],
     }
 
@@ -426,16 +433,18 @@ def _op_get_resource_usage(controller, rd, params, context):
     resource_id = _int(params.get("resource_id"))
     if resource_id <= 0:
         raise ValueError("resource_id must be a positive integer")
+    offset = _clamp(params.get("offset"), 0, 10000000, 0)
     limit = _clamp(params.get("limit"), 1, 5000, 200)
     usage = controller.GetUsage(_lookup_resource_id(controller, resource_id))
     entries = []
-    for item in usage[:limit]:
+    for item in usage[offset : offset + limit]:
         entries.append({"event_id": _int(item.eventId), "usage": _enum(getattr(item, "usage", ""))})
     return {
         "resource_id": resource_id,
+        "offset": offset,
         "limit": limit,
         "usage_count": len(usage),
-        "truncated": len(usage) > limit,
+        "truncated": len(usage) > offset + limit,
         "usage": entries,
     }
 
@@ -795,7 +804,7 @@ def _op_get_buffer_data(controller, rd, params, context):
         "offset": offset,
         "length": len(raw),
         "preview_hex": _text(binascii.hexlify(raw[:preview_bytes]).decode("ascii", "replace")),
-        "preview_base64": _text(base64.b64encode(raw[:preview_bytes])),
+        "preview_base64": _text(base64.b64encode(raw[:preview_bytes]).decode("ascii", "replace")),
         "output_file": output_file or None,
         "size_bytes": int(os.path.getsize(output_file)) if output_file else None,
     }

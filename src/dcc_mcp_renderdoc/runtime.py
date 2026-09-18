@@ -1011,6 +1011,8 @@ def convert_capture(
         raise RenderDocError(f"convert_format must be one of these values: {choices}")
     capture = _require_capture(capture_file)
     output = _prepare_output(output_file, {CONVERT_FORMATS[convert_format]})
+    if output.is_file():
+        output.unlink()
     _run(
         [
             "convert",

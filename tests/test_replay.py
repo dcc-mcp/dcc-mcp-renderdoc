@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -745,6 +746,53 @@ def test_bridge_list_actions_walks_filters_and_pages(monkeypatch, tmp_path):
     assert [entry["event_id"] for entry in status["result"]["actions"]] == [2, 3]
 
 
+def test_bridge_list_actions_filters_before_paging(monkeypatch, tmp_path):
+    controller = FakeController(
+        actions=[
+            _action(1, "Draw A", flags=1),
+            _action(2, "Clear B", flags=8),
+            _action(3, "Clear C", flags=8),
+            _action(4, "Draw D", flags=1),
+            _action(5, "Clear E", flags=8),
+        ]
+    )
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "list_actions",
+        {"name_filter": "clear", "limit": 2},
+        controller=controller,
+    )
+    result = status["result"]
+    assert [entry["event_id"] for entry in result["actions"]] == [2, 3]
+    assert result["matched_count"] == 3
+    assert result["truncated"] is True
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "list_actions",
+        {"name_filter": "clear", "offset": 1, "limit": 2},
+        controller=controller,
+    )
+    result = status["result"]
+    assert [entry["event_id"] for entry in result["actions"]] == [3, 5]
+    assert result["matched_count"] == 3
+    assert result["truncated"] is False
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "list_actions",
+        {"name_filter": "clear", "offset": 2, "limit": 1},
+        controller=controller,
+    )
+    result = status["result"]
+    assert [entry["event_id"] for entry in result["actions"]] == [5]
+    assert result["matched_count"] == 3
+
+
 def test_bridge_list_actions_can_start_from_a_parent(monkeypatch, tmp_path):
     status, _ = run_bridge(monkeypatch, tmp_path, "list_actions", {"parent_event_id": 1})
     assert [entry["event_id"] for entry in status["result"]["actions"]] == [2, 3]
@@ -789,6 +837,39 @@ def test_bridge_get_resource_usage_reports_renderdoc_roles(monkeypatch, tmp_path
 
     status, _ = run_bridge(monkeypatch, tmp_path, "get_resource_usage", {"resource_id": 0})
     assert "resource_id must be a positive integer" in status["error"]
+
+
+def test_bridge_get_resource_usage_pages_the_event_list(monkeypatch, tmp_path):
+    controller = FakeController()
+    usage = [
+        SimpleNamespace(eventId=event, usage=_Enum("ResourceUsage.ColorTarget", 16))
+        for event in (2, 5, 9)
+    ]
+    controller.GetUsage = lambda resource_id: usage
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "get_resource_usage",
+        {"resource_id": 11, "limit": 2},
+        controller=controller,
+    )
+    result = status["result"]
+    assert [entry["event_id"] for entry in result["usage"]] == [2, 5]
+    assert result["usage_count"] == 3
+    assert result["truncated"] is True
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "get_resource_usage",
+        {"resource_id": 11, "offset": 2, "limit": 2},
+        controller=controller,
+    )
+    result = status["result"]
+    assert [entry["event_id"] for entry in result["usage"]] == [9]
+    assert result["usage_count"] == 3
+    assert result["truncated"] is False
 
 
 def test_bridge_rejects_resource_id_absent_from_the_capture(monkeypatch, tmp_path):
@@ -891,6 +972,8 @@ def test_bridge_get_buffer_data_previews_and_writes(monkeypatch, tmp_path):
     result = status["result"]
     assert result["length"] == 4
     assert result["preview_hex"] == "01020304"
+    assert result["preview_base64"] == "AQIDBA=="
+    assert base64.b64decode(result["preview_base64"]) == b"\x01\x02\x03\x04"
     assert result["output_file"] is None
 
     output = tmp_path / "buffer.bin"
@@ -1058,6 +1141,19 @@ def test_convert_capture_rejects_missing_output(monkeypatch, tmp_path):
     )
     with pytest.raises(runtime.RenderDocError, match="did not create the converted file"):
         runtime.convert_capture(str(capture), str(tmp_path / "out.xml"))
+
+
+def test_convert_capture_rejects_a_stale_output_file(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    output = tmp_path / "out.xml"
+    output.write_text("<stale/>")
+    monkeypatch.setattr(
+        runtime, "_run", lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
+    with pytest.raises(runtime.RenderDocError, match="did not create the converted file"):
+        runtime.convert_capture(str(capture), str(output))
+    assert not output.is_file()
 
 
 def test_inspect_skill_declares_one_tool_per_script():

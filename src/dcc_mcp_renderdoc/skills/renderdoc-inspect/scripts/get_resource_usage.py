@@ -4,11 +4,11 @@ from dcc_mcp_renderdoc.replay import clean_params, run_replay_operation
 
 
 @skill_entry
-def main(capture_file: str, resource_id: int, limit: int = 200, **_kwargs):
+def main(capture_file: str, resource_id: int, offset: int = 0, limit: int = 200, **_kwargs):
     result = run_replay_operation(
         capture_file,
         "get_resource_usage",
-        clean_params(resource_id=resource_id, limit=limit),
+        clean_params(resource_id=resource_id, offset=offset, limit=limit),
     )
     return skill_success("RenderDoc resource usage listed.", **result)
 

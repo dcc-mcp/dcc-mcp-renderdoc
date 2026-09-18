@@ -104,13 +104,14 @@ tools:
       on-success: [renderdoc_inspect__get_resource_usage, renderdoc_inspect__get_texture_data]
       on-failure: [renderdoc_inspect__describe_capture, dcc_diagnostics__audit_log]
   - name: get_resource_usage
-    description: Report every event that uses one resource, with the RenderDoc usage role for each (vertex buffer, index buffer, colour target, depth target, shader resource, constant buffer, copy source or destination, and so on). Use to answer which draw touched a texture or buffer. Not for the values stored in the resource — use renderdoc_inspect__get_buffer_data or renderdoc_inspect__get_texture_data.
+    description: Report every event that uses one resource, with the RenderDoc usage role for each (vertex buffer, index buffer, colour target, depth target, shader resource, constant buffer, copy source or destination, and so on). Supports offset and limit paging when a resource is used by many events. Use to answer which draw touched a texture or buffer. Not for the values stored in the resource — use renderdoc_inspect__get_buffer_data or renderdoc_inspect__get_texture_data.
     input_schema:
       type: object
       required: [capture_file, resource_id]
       properties:
         capture_file: {type: string, minLength: 1, maxLength: 1000}
         resource_id: {type: integer, minimum: 1}
+        offset: {type: integer, minimum: 0, maximum: 10000000, default: 0}
         limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
       additionalProperties: false
     output_schema: {type: object}
