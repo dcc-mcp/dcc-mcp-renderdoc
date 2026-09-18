@@ -18,7 +18,7 @@ tools:
       on-success: [renderdoc_debug__pick_pixel, renderdoc_inspect__list_actions]
       on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
   - name: pick_pixel
-    description: Pick the pixel at one coordinate of a texture at one event and report which draw last wrote it — hit event ID, primitive ID, fragment index — together with the value before the write, after the write, and the value the shader produced, plus the failure flags (depth test, stencil test, scissor clip, backface cull, shader discard, unbound pixel shader) that explain why a write did not land. Use to attribute one pixel to one draw before stepping its shader. Not for the full list of writes — use renderdoc_debug__pixel_history.
+    description: Report the last draw that landed on one pixel of one texture at one event — the draw is resolved from the pixel history as the last modification that passed the depth and stencil tests, and comes back with its event ID, primitive ID, fragment index, the value before and after its write, and the value the shader produced, plus the failure flags (depth test, stencil test, scissor clip, backface cull, shader discard, unbound pixel shader) that explain why a later write did not land. Also returns the pixel's current contents as a PixelValue, which carries no event identity of its own. Requires a capture whose replay supports pixel history. Use to attribute one pixel to one draw before stepping its shader. Not for the full list of writes — use renderdoc_debug__pixel_history.
     input_schema:
       type: object
       required: [capture_file, resource_id, x, y]
@@ -100,7 +100,7 @@ tools:
       on-success: [renderdoc_inspect__get_shader_info, renderdoc_debug__pixel_history]
       on-failure: [renderdoc_debug__debug_capabilities, dcc_diagnostics__audit_log]
   - name: debug_vertex
-    description: Step the vertex shader for one vertex of one instance, returning the same trace shape as debug_pixel — stage, step count, per-step next instruction and register changes, shader inputs, and source variables. vertex_index selects the vertex, instance the instance, and index, instance_offset, and vertex_offset carry the draw's own offsets through to RenderDoc. Requires a capture whose replay supports shader debugging. Not for pixel shader stepping — use renderdoc_debug__debug_pixel.
+    description: Step the vertex shader for one vertex of one instance, returning the same trace shape as debug_pixel — stage, step count, per-step next instruction and register changes, shader inputs, and source variables. vertex_index selects the vertex, instance the instance, index the position in the index buffer, and view the view to debug; RenderDoc takes exactly these four selectors and applies no drawcall offsets itself, so fold the draw's vertex and instance offsets into vertex_index, instance, and index first — renderdoc_inspect__get_action reports them. Requires a capture whose replay supports shader debugging. Not for pixel shader stepping — use renderdoc_debug__debug_pixel.
     input_schema:
       type: object
       required: [capture_file]
@@ -110,8 +110,7 @@ tools:
         vertex_index: {type: integer, minimum: 0, maximum: 1073741824, default: 0}
         instance: {type: integer, minimum: 0, maximum: 65535, default: 0}
         index: {type: integer, minimum: 0, maximum: 1073741824, default: 0}
-        instance_offset: {type: integer, minimum: 0, maximum: 1073741824, default: 0}
-        vertex_offset: {type: integer, minimum: 0, maximum: 1073741824, default: 0}
+        view: {type: integer, minimum: 0, maximum: 65535, default: 0}
         max_steps: {type: integer, minimum: 1, maximum: 20000, default: 200}
         detail: {type: string, enum: [trace, summary], default: trace}
       additionalProperties: false

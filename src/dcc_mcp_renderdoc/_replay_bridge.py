@@ -26,6 +26,9 @@ MAX_PREVIEW_BYTES = 4096
 MAX_TEXT_CHARS = 20000
 MAX_VERTICES = 4096
 MAX_INDICES = 65536
+#: Hard ceiling on how far one shader debug trace is stepped before it is
+#: reported as truncated, so a pathological shader cannot spin forever.
+MAX_DEBUG_STEPS = 20000
 
 _SHADER_STAGES = ("Vertex", "Hull", "Domain", "Geometry", "Pixel", "Compute")
 _MESH_STAGES = ("VSIn", "VSOut", "GSOut", "TaskOut", "MeshOut")
@@ -265,10 +268,10 @@ def _replay_capabilities(controller):
     except BaseException:
         return {"available": False}
     local = bool(getattr(properties, "localRenderer", False))
+    # RenderDoc exposes no post-VS-data flag on every version, so the replay mode
+    # is the reliable answer: a local (non-degraded) replay can always fetch it.
     post_vs_data = getattr(properties, "postVSData", None)
     if post_vs_data is None:
-        # RenderDoc advertises no per-capture flag for post-VS data, so fall back
-        # to the replay mode: a local (non-degraded) replay can always fetch it.
         post_vs_data = local
     return {
         "available": True,
@@ -912,22 +915,58 @@ def _debug_detail(params):
     return detail
 
 
+def _drive_debug(controller, trace):
+    """Step RenderDoc's debugger until the trace is complete.
+
+    RenderDoc hands back a ``ShaderDebugTrace`` with nothing recorded in it: the
+    states only accumulate while ``ContinueDebug`` is driven, which is why the
+    official example loops over that call before reading the trace. A trace read
+    any earlier looks empty no matter what the shader did, so an empty result
+    after this loop is a failure to step, not an empty shader.
+    """
+    debugger = getattr(trace, "debugger", None)
+    if debugger is None:
+        raise RuntimeError(
+            "RenderDoc returned a shader debug trace without a debugger, so this "
+            "invocation cannot be stepped"
+        )
+    stepped = 0
+    while bool(controller.ContinueDebug(debugger)):
+        stepped += 1
+        if stepped >= MAX_DEBUG_STEPS:
+            break
+    return list(getattr(trace, "states", ()) or ())
+
+
 def _trace_info(controller, trace, max_steps, detail, facts):
     """Serialise one shader debug trace and always hand it back to RenderDoc.
+
+    The trace is stepped to completion before anything is read out of it, and a
+    trace that ends up with no states is reported as a failure rather than as a
+    successful empty result.
 
     ``detail`` selects the payload: ``trace`` returns every captured step up to
     ``max_steps``, ``summary`` returns only the trace shape — stage, step count,
     inputs, and source variables — so a caller can decide whether the full trace
     is worth fetching.
     """
+    if trace is None:
+        raise RuntimeError("RenderDoc returned no shader debug trace for this invocation")
     info = dict(facts)
     info["stage"] = _enum(getattr(trace, "stage", ""))
-    info["step_count"] = len(trace.states)
     info["detail"] = detail
     try:
+        states = _drive_debug(controller, trace)
+        if not states:
+            raise RuntimeError(
+                "RenderDoc stepped this invocation but recorded no debug states, "
+                "so there is no trace to report"
+            )
+        info["step_count"] = len(states)
+        info["truncated"] = len(states) > max_steps
         if detail == "trace":
             steps = []
-            for state in list(trace.states)[:max_steps]:
+            for state in states[:max_steps]:
                 steps.append(
                     {
                         "step_index": _int(state.stepIndex),
@@ -937,7 +976,6 @@ def _trace_info(controller, trace, max_steps, detail, facts):
                     }
                 )
             info["steps"] = steps
-            info["truncated"] = len(trace.states) > max_steps
         info["inputs"] = _describe(getattr(trace, "inputs", None))
         info["source_vars"] = _describe(getattr(trace, "sourceVars", None))
     finally:
@@ -959,31 +997,36 @@ def _uint3(params, key):
     return clamped
 
 
-def _op_pick_pixel(controller, rd, params, context):
-    del context
-    event_id = _set_event(controller, params.get("event_id"))
-    resource_id = _int(params.get("resource_id"))
-    if resource_id <= 0:
-        raise ValueError("resource_id must be a positive integer")
-    x = _clamp(params.get("x"), 0, 1 << 20, 0)
-    y = _clamp(params.get("y"), 0, 1 << 20, 0)
-    modification = controller.PickPixel(
-        _lookup_resource_id(controller, resource_id),
-        x,
-        y,
-        _subresource(rd, params),
-        _comp_type(rd, params),
-    )
+def _pixel_value(value):
+    """Read one RenderDoc ``PixelValue`` — the contents of a pixel.
+
+    ``PickPixel`` answers "what is in this pixel": four channels decoded as
+    float, unsigned, and signed integers, and nothing about the draw that put
+    them there. Anything about *which* draw wrote the pixel has to come from
+    ``PixelHistory``, which is the only source of ``PixelModification``.
+    """
+    if value is None:
+        return None
+    channels = {}
+    for name in ("floatValue", "uintValue", "intValue"):
+        raw = getattr(value, name, None)
+        if raw is None:
+            continue
+        try:
+            channels[name] = [float(item) if name == "floatValue" else _int(item) for item in raw]
+        except BaseException:
+            channels[name] = None
+    return channels or None
+
+
+def _modification_entry(modification):
+    """Serialise one RenderDoc ``PixelModification`` from a pixel history."""
     try:
         passed = bool(modification.Passed())
     except BaseException:
         passed = None
     return {
-        "event_id": event_id,
-        "resource_id": resource_id,
-        "x": x,
-        "y": y,
-        "hit_event_id": _int(modification.eventId),
+        "event_id": _int(modification.eventId),
         "primitive_id": _int(modification.primitiveID),
         "frag_index": _int(modification.fragIndex),
         "passed": passed,
@@ -999,12 +1042,65 @@ def _op_pick_pixel(controller, rd, params, context):
     }
 
 
+def _op_pick_pixel(controller, rd, params, context):
+    """Report the last draw that actually landed on one pixel.
+
+    ``PickPixel`` cannot attribute a pixel to a draw: it returns a
+    ``PixelValue``, the pixel's contents. So the draw comes from the pixel
+    history — the last modification that passed the depth and stencil tests is
+    the draw that last wrote this coordinate — and ``PickPixel`` is used only for
+    the value that is sitting in the pixel now.
+    """
+    del context
+    event_id = _set_event(controller, params.get("event_id"))
+    resource_id = _int(params.get("resource_id"))
+    if resource_id <= 0:
+        raise ValueError("resource_id must be a positive integer")
+    x = _clamp(params.get("x"), 0, 1 << 20, 0)
+    y = _clamp(params.get("y"), 0, 1 << 20, 0)
+    properties = controller.GetAPIProperties()
+    if not bool(getattr(properties, "pixelHistory", False)):
+        raise RuntimeError("this capture's replay does not support pixel history")
+    native_id = _lookup_resource_id(controller, resource_id)
+    subresource = _subresource(rd, params)
+    type_cast = _comp_type(rd, params)
+    modifications = controller.PixelHistory(native_id, x, y, subresource, type_cast)
+    hit = None
+    for modification in modifications:
+        entry = _modification_entry(modification)
+        if entry["passed"]:
+            hit = entry
+    result = {
+        "event_id": event_id,
+        "resource_id": resource_id,
+        "x": x,
+        "y": y,
+        "modification_count": len(modifications),
+        "hit_event_id": None if hit is None else hit["event_id"],
+        "hit": hit,
+        "pixel_value": _pixel_value(controller.PickPixel(native_id, x, y, subresource, type_cast)),
+    }
+    if hit is None:
+        result["hit_note"] = (
+            "no draw passed the depth and stencil tests at this coordinate in the "
+            "events replayed up to event {}".format(event_id)
+        )
+    return result
+
+
 def _mesh_indices(controller, mesh):
-    """Read the post-VS index buffer, when the stage reported one."""
+    """Read the post-VS index buffer, when the stage reported one.
+
+    Returns ``(indices, note)``. ``GetBufferData`` can hand back fewer bytes than
+    were asked for, and decoding the full requested count would then raise and
+    throw away the whole decodable prefix, so the pattern is sized to the bytes
+    that actually arrived and a short read is reported in ``note`` instead of
+    collapsing to an empty index list.
+    """
     stride = _int(getattr(mesh, "indexByteStride", 0))
     count = min(_int(getattr(mesh, "numIndices", 0)), MAX_INDICES)
     if _int(getattr(mesh, "indexResourceId", 0)) == 0 or count <= 0 or stride not in (2, 4):
-        return []
+        return [], None
     raw = bytes(
         controller.GetBufferData(
             mesh.indexResourceId,
@@ -1013,14 +1109,34 @@ def _mesh_indices(controller, mesh):
         )
         or b""
     )
-    pattern = "<{}H".format(count) if stride == 2 else "<{}I".format(count)
+    usable = min(count, len(raw) // stride)
+    if usable <= 0:
+        return [], "RenderDoc returned no index bytes for this stage"
+    if usable < count:
+        note = "RenderDoc returned {} of {} index bytes; decoded {} of {} indices".format(
+            len(raw), count * stride, usable, count
+        )
+    else:
+        note = None
+    pattern = "<{}H".format(usable) if stride == 2 else "<{}I".format(usable)
     try:
-        return [int(value) for value in struct.unpack(pattern, raw[: count * stride])]
-    except BaseException:
-        return []
+        return [int(value) for value in struct.unpack(pattern, raw[: usable * stride])], note
+    except BaseException as exc:
+        return [], "could not decode the index buffer: {}: {}".format(type(exc).__name__, exc)
 
 
 def _write_obj(path, vertices, indices):
+    """Write a Wavefront mesh, dropping faces that address a missing vertex.
+
+    OBJ face indices are 1-based and have to address a vertex that was actually
+    written. An index buffer is frequently wider than the vertex window this
+    export fetched — ``max_vertices`` caps vertices at 4096 while
+    ``MAX_INDICES`` allows 65536 — so faces pointing outside the window are
+    dropped rather than written as references no loader will accept.
+    """
+    vertex_count = len(vertices)
+    faces = 0
+    dropped = 0
     with open(path, "w") as stream:
         stream.write("# post-VS mesh exported by dcc-mcp-renderdoc\n")
         for vertex in vertices:
@@ -1028,7 +1144,12 @@ def _write_obj(path, vertices, indices):
             stream.write("v {}\n".format(components))
         for start in range(0, len(indices) - len(indices) % 3, 3):
             face = [int(value) + 1 for value in indices[start : start + 3]]
+            if any(value < 1 or value > vertex_count for value in face):
+                dropped += 1
+                continue
             stream.write("f {} {} {}\n".format(face[0], face[1], face[2]))
+            faces += 1
+    return faces, dropped
 
 
 def _write_json(path, document):
@@ -1077,7 +1198,7 @@ def _op_export_mesh(controller, rd, params, context):
             or b""
         )
         vertices = _decode_vertices(raw, stride, comp_count)[:max_vertices]
-    indices = _mesh_indices(controller, mesh)
+    indices, index_note = _mesh_indices(controller, mesh)
     document = {
         "event_id": event_id,
         "stage": stage_name,
@@ -1095,8 +1216,9 @@ def _op_export_mesh(controller, rd, params, context):
         "indices": indices,
     }
     if export_format == "obj":
-        _write_obj(output_file, vertices, indices)
+        face_count, dropped_faces = _write_obj(output_file, vertices, indices)
     else:
+        face_count, dropped_faces = len(indices) // 3, 0
         _write_json(output_file, document)
     if not os.path.isfile(output_file):
         raise RuntimeError("RenderDoc did not create {}".format(output_file))
@@ -1109,6 +1231,9 @@ def _op_export_mesh(controller, rd, params, context):
             "num_indices": _int(getattr(mesh, "numIndices", 0)),
             "vertex_count": len(vertices),
             "index_count": len(indices),
+            "face_count": face_count,
+            "dropped_faces": dropped_faces,
+            "index_note": index_note,
             "truncated": len(vertices) >= max_vertices,
             "output_file": output_file,
             "output_format": export_format,
@@ -1140,27 +1265,7 @@ def _op_get_pixel_history(controller, rd, params, context):
     )
     entries = []
     for modification in modifications[:limit]:
-        try:
-            passed = bool(modification.Passed())
-        except BaseException:
-            passed = None
-        entries.append(
-            {
-                "event_id": _int(modification.eventId),
-                "primitive_id": _int(modification.primitiveID),
-                "frag_index": _int(modification.fragIndex),
-                "passed": passed,
-                "unbound_ps": bool(getattr(modification, "unboundPS", False)),
-                "shader_discarded": bool(getattr(modification, "shaderDiscarded", False)),
-                "depth_test_failed": bool(getattr(modification, "depthTestFailed", False)),
-                "stencil_test_failed": bool(getattr(modification, "stencilTestFailed", False)),
-                "scissor_clipped": bool(getattr(modification, "scissorClipped", False)),
-                "backface_culled": bool(getattr(modification, "backfaceCulled", False)),
-                "pre_mod": _describe(getattr(modification, "preMod", None)),
-                "post_mod": _describe(getattr(modification, "postMod", None)),
-                "shader_out": _describe(getattr(modification, "shaderOut", None)),
-            }
-        )
+        entries.append(_modification_entry(modification))
     return {
         "event_id": event_id,
         "resource_id": resource_id,
@@ -1179,7 +1284,7 @@ def _op_debug_pixel(controller, rd, params, context):
     _require_debugging(controller)
     x = _clamp(params.get("x"), 0, 1 << 20, 0)
     y = _clamp(params.get("y"), 0, 1 << 20, 0)
-    max_steps = _clamp(params.get("max_steps"), 1, 20000, 200)
+    max_steps = _clamp(params.get("max_steps"), 1, MAX_DEBUG_STEPS, 200)
     inputs = rd.DebugPixelInputs()
     inputs.sample = _clamp(params.get("sample"), 0, 65535, 0)
     inputs.primitive = _clamp(params.get("primitive"), 0, 1 << 30, 0)
@@ -1195,23 +1300,30 @@ def _op_debug_pixel(controller, rd, params, context):
 
 
 def _op_debug_vertex(controller, rd, params, context):
+    """Step the vertex shader for one vertex of one instance.
+
+    RenderDoc's ``DebugVertex`` takes exactly four selectors — ``vertid``,
+    ``instid``, ``idx``, ``view`` — and applies no drawcall offsets of its own.
+    A caller that wants a specific vertex of a specific instance therefore has to
+    fold the draw's ``vertex_offset`` and ``instance_offset`` into
+    ``vertex_index``, ``instance``, and ``index`` first;
+    ``renderdoc_inspect__get_action`` reports those offsets.
+    """
     del rd, context
     event_id = _set_event(controller, params.get("event_id"))
     _require_debugging(controller)
-    max_steps = _clamp(params.get("max_steps"), 1, 20000, 200)
+    max_steps = _clamp(params.get("max_steps"), 1, MAX_DEBUG_STEPS, 200)
     selector = {
         "vertex_index": _clamp(params.get("vertex_index"), 0, 1 << 30, 0),
         "instance": _clamp(params.get("instance"), 0, 65535, 0),
         "index": _clamp(params.get("index"), 0, 1 << 30, 0),
-        "instance_offset": _clamp(params.get("instance_offset"), 0, 1 << 30, 0),
-        "vertex_offset": _clamp(params.get("vertex_offset"), 0, 1 << 30, 0),
+        "view": _clamp(params.get("view"), 0, 65535, 0),
     }
     trace = controller.DebugVertex(
         selector["vertex_index"],
         selector["instance"],
         selector["index"],
-        selector["instance_offset"],
-        selector["vertex_offset"],
+        selector["view"],
     )
     selector["event_id"] = event_id
     return _trace_info(controller, trace, max_steps, _debug_detail(params), selector)
@@ -1221,7 +1333,7 @@ def _op_debug_thread(controller, rd, params, context):
     del rd, context
     event_id = _set_event(controller, params.get("event_id"))
     _require_debugging(controller)
-    max_steps = _clamp(params.get("max_steps"), 1, 20000, 200)
+    max_steps = _clamp(params.get("max_steps"), 1, MAX_DEBUG_STEPS, 200)
     group_id = _uint3(params, "group_id")
     thread_id = _uint3(params, "thread_id")
     trace = controller.DebugThread(group_id, thread_id)

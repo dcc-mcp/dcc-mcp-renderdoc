@@ -67,7 +67,9 @@ DEBUG_TOOLS: Dict[str, str] = {
 #: Per-capture replay flag each debug tool needs on top of the deep backend.
 #: ``None`` means the backend alone is enough for that tool.
 DEBUG_FLAGS: Dict[str, Optional[str]] = {
-    "pick_pixel": None,
+    # pick_pixel attributes a pixel to a draw through the pixel history, so it
+    # needs the same per-capture flag as pixel_history.
+    "pick_pixel": "pixel_history",
     "pixel_history": "pixel_history",
     "debug_pixel": "shader_debugging",
     "debug_vertex": "shader_debugging",
