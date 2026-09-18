@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 
 def _write(path: str, value: str) -> None:
@@ -30,6 +31,7 @@ def _root(
     ready_path: str,
     *,
     exit_after_ready: bool,
+    release_path: Optional[str] = None,
 ) -> None:
     _write(root_pid_path, str(os.getpid()))
     subprocess.Popen(
@@ -45,7 +47,11 @@ def _root(
     if exit_after_ready:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if Path(ready_path).is_file():
+            # `release_path` lets a test bind the descendant identity before the
+            # root exits, so cleanup cannot signal the tree mid-bind.
+            if Path(ready_path).is_file() and (
+                release_path is None or Path(release_path).is_file()
+            ):
                 return
             time.sleep(0.01)
         raise RuntimeError("descendant did not become ready")
@@ -62,6 +68,7 @@ def main() -> None:
         sys.argv[2],
         sys.argv[3],
         exit_after_ready=len(sys.argv) > 4 and sys.argv[4] == "root-exit",
+        release_path=sys.argv[5] if len(sys.argv) > 5 else None,
     )
 
 
