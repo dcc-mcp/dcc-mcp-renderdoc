@@ -993,3 +993,42 @@ def export_timeline(
         "output_file": str(output),
         "size_bytes": output.stat().st_size,
     }
+
+
+CONVERT_FORMATS = {"xml": ".xml", "chrome.json": ".json"}
+
+
+def convert_capture(
+    capture_file: str,
+    output_file: str,
+    *,
+    convert_format: str = "xml",
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Convert a capture to another RenderDoc-supported serialised format."""
+    if convert_format not in CONVERT_FORMATS:
+        choices = ", ".join(sorted(CONVERT_FORMATS))
+        raise RenderDocError(f"convert_format must be one of these values: {choices}")
+    capture = _require_capture(capture_file)
+    output = _prepare_output(output_file, {CONVERT_FORMATS[convert_format]})
+    _run(
+        [
+            "convert",
+            "--filename",
+            str(capture),
+            "--output",
+            str(output),
+            "--convert-format",
+            convert_format,
+        ],
+        timeout_secs=180,
+        command=command,
+    )
+    if not output.is_file():
+        raise RenderDocError("RenderDoc reported success but did not create the converted file")
+    return {
+        "capture_file": str(capture),
+        "output_file": str(output),
+        "convert_format": convert_format,
+        "size_bytes": output.stat().st_size,
+    }
