@@ -62,6 +62,7 @@ def test_bundled_skills_and_release_workflow_exist():
     assert {path.name for path in skills.iterdir() if path.is_dir()} == {
         "renderdoc-analysis",
         "renderdoc-capture",
+        "renderdoc-inspect",
     }
     assert (root / ".github" / "workflows" / "release.yml").is_file()
 

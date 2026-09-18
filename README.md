@@ -97,9 +97,18 @@ through the stable gateway at `http://127.0.0.1:9765/mcp`; set
 - Inspect capture driver, machine identity, chunk version, frame-work and Present counts, and representative calls.
 - Export a capture thumbnail for visual review.
 - Export Chrome trace JSON for timeline tooling.
+- Convert a capture to RenderDoc XML or Chrome trace JSON for downstream tooling.
+- Report which RenderDoc backends are reachable — the `renderdoccmd` baseline and the deep
+  `renderdoc.pyd` replay backend driven through `qrenderdoc` — and which capabilities they unlock.
+- Inspect a capture through deep replay: describe it, search and page the action tree, inspect one
+  event, enumerate resources and their usage, and read pipeline state, shader reflection, shader
+  source and disassembly, constant buffer values, and texture and buffer contents.
 
 The capture tool launches only the explicit executable and arguments supplied by the caller. It
-never invokes a shell. Analysis tools are read-only with respect to the `.rdc` input.
+never invokes a shell. Analysis tools are read-only with respect to the `.rdc` input. Deep replay
+tools are read-only as well, run inside an isolated RenderDoc profile, and degrade with an explicit
+"backend unavailable, here is how to enable it" message when `qrenderdoc` is absent; only
+`get_texture_data` and `get_buffer_data` write files, and only to a destination you name.
 
 Pass `trigger_after_secs` to `capture_program` for a Target Control trigger. This requires
 `qrenderdoc` beside `renderdoccmd`. The official RenderDoc runtime supports Windows and Linux;
