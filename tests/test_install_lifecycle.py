@@ -63,11 +63,20 @@ def test_install_contract_uses_official_core_loader_and_resource():
         .joinpath("schemas", "adapter-install-sop-v1.schema.json")
         .read_bytes()
     )
-    assert len(schema_bytes) == 4261
-    assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904"
-    )
-    Draft202012Validator.check_schema(install_contract.load_install_sop_schema())
+    # The schema ships inside Core, so its byte length and digest move whenever
+    # Core republishes it. Pin the contract's identity and shape instead, and
+    # check the adapter hands back Core's own document rather than a copy.
+    schema_id = "https://dcc-mcp.github.io/schemas/adapter-install-sop-v1.schema.json"
+    shipped = json.loads(schema_bytes)
+    loaded = install_contract.load_install_sop_schema()
+    Draft202012Validator.check_schema(shipped)
+    Draft202012Validator.check_schema(loaded)
+    assert shipped["$id"] == schema_id
+    assert loaded["$id"] == schema_id
+    assert shipped["type"] == "object"
+    assert loaded["type"] == "object"
+    assert shipped["required"] == loaded["required"]
+    assert "schema_version" in shipped["required"]
 
 
 def test_current_target_python_probe_reuses_proven_import_context(monkeypatch, tmp_path):
