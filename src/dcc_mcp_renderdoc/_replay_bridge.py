@@ -25,6 +25,9 @@ MAX_ITEMS = 256
 MAX_PREVIEW_BYTES = 4096
 MAX_TEXT_CHARS = 20000
 MAX_VERTICES = 4096
+#: Hard ceiling on how far one shader debug trace is stepped before it is
+#: reported as truncated, so a pathological shader cannot spin forever.
+MAX_DEBUG_STEPS = 20000
 
 _SHADER_STAGES = ("Vertex", "Hull", "Domain", "Geometry", "Pixel", "Compute")
 _MESH_STAGES = ("VSIn", "VSOut", "GSOut", "TaskOut", "MeshOut")
@@ -941,12 +944,39 @@ def _op_get_pixel_history(controller, rd, params, context):
     }
 
 
+def _collect_debug_states(controller, trace):
+    """Step RenderDoc's debugger to completion and collect the states it yields.
+
+    ``ContinueDebug`` hands back the batch of ``ShaderDebugState`` recorded since
+    the previous call, and an empty batch once the trace is complete -- the
+    states are never readable off the trace itself. Stepping therefore stops on
+    that empty batch, or at ``MAX_DEBUG_STEPS`` so a pathological shader cannot
+    spin forever.
+    """
+    debugger = getattr(trace, "debugger", None)
+    if debugger is None:
+        raise RuntimeError(
+            "RenderDoc returned a shader debug trace without a debugger, so this "
+            "invocation cannot be stepped"
+        )
+    states = []
+    while len(states) < MAX_DEBUG_STEPS:
+        batch = controller.ContinueDebug(debugger)
+        if batch is None:
+            break
+        batch = list(batch)
+        if not batch:
+            break
+        states.extend(batch)
+    return states[:MAX_DEBUG_STEPS]
+
+
 def _op_debug_pixel(controller, rd, params, context):
     del context
     event_id = _set_event(controller, params.get("event_id"))
     x = _clamp(params.get("x"), 0, 1 << 20, 0)
     y = _clamp(params.get("y"), 0, 1 << 20, 0)
-    max_steps = _clamp(params.get("max_steps"), 1, 20000, 200)
+    max_steps = _clamp(params.get("max_steps"), 1, MAX_DEBUG_STEPS, 200)
     properties = controller.GetAPIProperties()
     if not bool(getattr(properties, "shaderDebugging", False)):
         raise RuntimeError("this capture's replay does not support shader debugging")
@@ -960,11 +990,11 @@ def _op_debug_pixel(controller, rd, params, context):
         "x": x,
         "y": y,
         "stage": _enum(getattr(trace, "stage", "")),
-        "step_count": len(trace.states),
     }
     steps = []
     try:
-        for state in list(trace.states)[:max_steps]:
+        states = _collect_debug_states(controller, trace)
+        for state in states[:max_steps]:
             steps.append(
                 {
                     "step_index": _int(state.stepIndex),
@@ -974,7 +1004,8 @@ def _op_debug_pixel(controller, rd, params, context):
                 }
             )
         info["steps"] = steps
-        info["truncated"] = len(trace.states) > max_steps
+        info["step_count"] = len(states)
+        info["truncated"] = len(states) > max_steps
         info["inputs"] = _describe(getattr(trace, "inputs", None))
         info["source_vars"] = _describe(getattr(trace, "sourceVars", None))
     finally:

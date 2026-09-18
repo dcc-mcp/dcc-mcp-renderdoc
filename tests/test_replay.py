@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from dcc_mcp_renderdoc import capabilities, replay, runtime
+from dcc_mcp_renderdoc._replay_bridge import MAX_DEBUG_STEPS
 from dcc_mcp_renderdoc.replay import clean_params
 
 BRIDGE = Path(replay.__file__).with_name("_replay_bridge.py")
@@ -106,6 +107,7 @@ class FakeController:
         ]
         self.shader_bound = True
         self.buffer_bytes = b"\x01\x02\x03\x04"
+        self.debug_batches_done = False
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -206,17 +208,25 @@ class FakeController:
         self.calls.append(("debug-pixel", x, y))
         return SimpleNamespace(
             stage=_Enum("ShaderStage.Pixel", 5),
-            states=[
-                SimpleNamespace(
-                    stepIndex=0,
-                    nextInstruction=1,
-                    flags=_Enum("ShaderEvents.NoEvent", 0),
-                    changes=None,
-                )
-            ],
+            debugger=_Enum("ShaderDebugger", 1),
             inputs=None,
             sourceVars=None,
         )
+
+    def ContinueDebug(self, debugger):
+        """Hand back one batch of states, then an empty batch to end the trace."""
+        self.calls.append(("continue-debug", int(debugger)))
+        if self.debug_batches_done:
+            return []
+        self.debug_batches_done = True
+        return [
+            SimpleNamespace(
+                stepIndex=0,
+                nextInstruction=1,
+                flags=_Enum("ShaderEvents.NoEvent", 0),
+                changes=None,
+            )
+        ]
 
     def FreeTrace(self, trace):
         self.calls.append(("free-trace",))
@@ -1019,6 +1029,15 @@ def test_bridge_get_pixel_history_requires_support(monkeypatch, tmp_path):
     assert result["modifications"][0]["post_mod"]["col"]["floatValue"][0] == 1.0
 
 
+def _debug_state(step):
+    return SimpleNamespace(
+        stepIndex=step,
+        nextInstruction=step + 1,
+        flags=_Enum("ShaderEvents.NoEvent", 0),
+        changes=None,
+    )
+
+
 def test_bridge_debug_pixel_requires_support_and_frees_the_trace(monkeypatch, tmp_path):
     controller = FakeController(shader_debugging=False)
     status, _ = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
@@ -1029,6 +1048,64 @@ def test_bridge_debug_pixel_requires_support_and_frees_the_trace(monkeypatch, tm
     assert result["stage"] == "ShaderStage.Pixel"
     assert result["steps"][0]["step_index"] == 0
     assert ("debug-pixel", 1, 2) in context.controller.calls
+    assert ("continue-debug", 1) in context.controller.calls
+    assert ("free-trace",) in context.controller.calls
+
+
+def test_bridge_debug_pixel_accumulates_every_continue_debug_batch(monkeypatch, tmp_path):
+    """States arrive batch by batch, so every batch has to be kept."""
+    controller = FakeController()
+    batches = [[_debug_state(0)], [_debug_state(1), _debug_state(2)], []]
+
+    def continue_debug(debugger):
+        controller.calls.append(("continue-debug", int(debugger)))
+        return batches.pop(0)
+
+    monkeypatch.setattr(controller, "ContinueDebug", continue_debug, raising=False)
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    result = status["result"]
+    assert result["step_count"] == 3
+    assert [entry["step_index"] for entry in result["steps"]] == [0, 1, 2]
+    assert result["truncated"] is False
+    # One call per batch plus the empty batch that ends the trace.
+    assert context.controller.calls.count(("continue-debug", 1)) == 3
+    assert ("free-trace",) in context.controller.calls
+
+
+def test_bridge_debug_pixel_caps_stepping_at_the_max_debug_steps(monkeypatch, tmp_path):
+    controller = FakeController()
+    oversized = [_debug_state(step) for step in range(MAX_DEBUG_STEPS + 1)]
+
+    def continue_debug(debugger):
+        controller.calls.append(("continue-debug", int(debugger)))
+        return oversized
+
+    monkeypatch.setattr(controller, "ContinueDebug", continue_debug, raising=False)
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    result = status["result"]
+    assert result["step_count"] == MAX_DEBUG_STEPS
+    assert len(result["steps"]) == 200
+    assert result["truncated"] is True
+    # Stepping stops as soon as the ceiling is reached.
+    assert context.controller.calls.count(("continue-debug", 1)) == 1
+    assert ("free-trace",) in context.controller.calls
+
+
+def test_bridge_debug_pixel_rejects_a_trace_without_a_debugger(monkeypatch, tmp_path):
+    controller = FakeController()
+    monkeypatch.setattr(
+        controller,
+        "DebugPixel",
+        lambda x, y, inputs: SimpleNamespace(
+            stage=_Enum("ShaderStage.Pixel", 5),
+            debugger=None,
+            inputs=None,
+            sourceVars=None,
+        ),
+        raising=False,
+    )
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    assert "without a debugger" in status["error"]
     assert ("free-trace",) in context.controller.calls
 
 
