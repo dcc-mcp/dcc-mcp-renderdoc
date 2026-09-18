@@ -21,7 +21,16 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from .capabilities import group_for, probe, require
+from .capabilities import (
+    DEBUG_FLAGS,
+    DEBUG_TOOLS,
+    DEEP_BACKEND,
+    ENABLE_HINT,
+    group_for,
+    probe,
+    require,
+    unsupported_message,
+)
 from .runtime import (
     RenderDocError,
     _configure_qrenderdoc_environment,
@@ -41,8 +50,12 @@ REPLAY_OPERATIONS = (
     "get_texture_data",
     "get_buffer_data",
     "get_mesh_data",
+    "export_mesh",
+    "pick_pixel",
     "get_pixel_history",
     "debug_pixel",
+    "debug_vertex",
+    "debug_thread",
     "get_counters",
     "get_debug_messages",
     "run_python_script",
@@ -52,6 +65,88 @@ REPLAY_OPERATIONS = (
 def describe_capabilities(command: Optional[str] = None) -> dict[str, Any]:
     """Report the reachable RenderDoc backends and the capabilities they unlock."""
     return probe(command)
+
+
+def unsupported_backend(group: str, command: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Report a capability group that needs a backend this host cannot reach.
+
+    Returns ``None`` when the group is available, so callers can gate on the
+    result without probing twice.
+    """
+    status = probe(command)
+    if status["capabilities"].get(group):
+        return None
+    return {
+        "supported": False,
+        "capability_group": group,
+        "backend": DEEP_BACKEND,
+        "reason": status["deep"]["reason"],
+        "hint": ENABLE_HINT,
+        "error_message": unsupported_message(group, status),
+    }
+
+
+def debug_capabilities(
+    capture_file: Optional[str] = None, command: Optional[str] = None
+) -> dict[str, Any]:
+    """Report the debug backend, its per-capture flags, and what each tool needs.
+
+    Pass ``capture_file`` to also open the capture and read RenderDoc's own
+    per-capture replay flags (``pixel_history``, ``shader_debugging``,
+    ``post_vs_data``). Without it the report covers the backend only and leaves
+    each flag state ``None``.
+    """
+    status = probe(command)
+    flags = None
+    capture = None
+    if capture_file and status["capabilities"].get("debug"):
+        described = run_replay_operation(capture_file, "describe_capture", command=command)
+        flags = described["result"].get("capabilities") or {}
+        capture = {"capture_file": described["capture_file"], "flags": flags}
+    tools = {}
+    for tool, operation in DEBUG_TOOLS.items():
+        flag = DEBUG_FLAGS.get(tool)
+        backend_available = bool(status["capabilities"].get("debug"))
+        flag_state = None if (flag is None or flags is None) else bool(flags.get(flag))
+        tools[tool] = {
+            "operation": operation,
+            "requires_flag": flag,
+            "backend_available": backend_available,
+            "flag_state": flag_state,
+            "supported": backend_available and (flag_state is None or flag_state),
+        }
+    return {
+        "baseline": status["baseline"],
+        "deep": status["deep"],
+        "capabilities": status["capabilities"],
+        "capture": capture,
+        "capture_checked": capture is not None,
+        "tools": tools,
+        "hint": status["hint"],
+    }
+
+
+def run_debug_operation(
+    capture_file: str,
+    operation: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    timeout_secs: int = 300,
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run one debug-group replay operation, or report the backend as unreachable.
+
+    The debug tools must never crash when ``renderdoc.pyd`` is absent, so an
+    unreachable backend comes back as a structured report for the caller to turn
+    into an explicit "unsupported, here is how to enable it" result instead of an
+    exception.
+    """
+    unsupported = unsupported_backend("debug", command=command)
+    if unsupported is not None:
+        return unsupported
+    return run_replay_operation(
+        capture_file, operation, params, timeout_secs=timeout_secs, command=command
+    )
 
 
 def clean_params(**values: Any) -> dict[str, Any]:
