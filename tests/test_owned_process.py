@@ -251,6 +251,7 @@ def test_posix_root_first_exit_still_kills_inherited_pipe_descendant(
     root_pid = tmp_path / "root.pid"
     descendant_pid = tmp_path / "descendant.pid"
     ready = tmp_path / "descendant.ready"
+    release = tmp_path / "descendant.release"
     command = [
         sys.executable,
         str(PROCESS_TREE_HELPER),
@@ -258,15 +259,22 @@ def test_posix_root_first_exit_still_kills_inherited_pipe_descendant(
         str(descendant_pid),
         str(ready),
         "root-exit",
+        str(release),
     ]
     started = time.monotonic()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(run_owned_process, command, timeout_secs=5.0)
+        # The root only exits once `release` exists, so the descendant is still
+        # alive here and its identity can be bound without racing tree cleanup.
         _wait_for_ready(future, ready)
-        descendant_identity = _ProcessIdentity(int(descendant_pid.read_text(encoding="ascii")))
+        try:
+            descendant_identity = _ProcessIdentity(int(descendant_pid.read_text(encoding="ascii")))
+        finally:
+            release.write_text("release", encoding="ascii")
         result = future.result(timeout=6)
 
     assert result.returncode == 0
+    assert "descendant stdout ready" in result.stdout
     assert time.monotonic() - started < 6
     _assert_tree_dead([descendant_identity])
