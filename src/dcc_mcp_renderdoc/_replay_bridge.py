@@ -30,6 +30,45 @@ MAX_INDICES = 65536
 #: Hard ceiling on how far one shader debug trace is stepped before it is
 #: reported as truncated, so a pathological shader cannot spin forever.
 MAX_DEBUG_STEPS = 20000
+#: Ceilings for the region sampling and pixel diagnostics analysis ops: grid
+#: points per axis and per request, texel bytes one readback may cover, texels
+#: one diagnosis may scan, and anomaly coordinates reported per check.
+MAX_REGION_GRID = 64
+MAX_REGION_SAMPLES = 4096
+MAX_REGION_BYTES = 256 * 1024 * 1024
+MAX_DIAGNOSE_TEXELS = 2000000
+MAX_ANOMALY_SAMPLES = 256
+#: Magnitude band a float texel has to stay inside to count as well
+#: conditioned. Below it the value is denormal-adjacent; above it any further
+#: maths on the value has lost most of its precision.
+FLOAT_TINY = 1e-20
+FLOAT_HUGE = 1e20
+#: Component types whose bytes decode to a number without a format table.
+#: Everything else -- block-compressed, packed, YUV, and the special formats --
+#: is reported as undecodable instead of sampled into a wrong number.
+_DECODABLE_COMP_TYPES = (
+    "CompType.Float",
+    "CompType.UNorm",
+    "CompType.UNormSRGB",
+    "CompType.SNorm",
+    "CompType.SInt",
+    "CompType.UInt",
+)
+#: Struct codes for integer components, keyed by (byte width, signed).
+_INT_CODES = {
+    (1, False): "B",
+    (1, True): "b",
+    (2, False): "H",
+    (2, True): "h",
+    (4, False): "I",
+    (4, True): "i",
+    (8, False): "Q",
+    (8, True): "q",
+}
+#: Struct codes for float components, keyed by byte width.
+_FLOAT_CODES = {2: "e", 4: "f", 8: "d"}
+#: The four anomaly checks ``diagnose_pixel_values`` can run, in report order.
+_PIXEL_CHECKS = ("nan", "inf", "negative", "precision")
 
 _SHADER_STAGES = ("Vertex", "Hull", "Domain", "Geometry", "Pixel", "Compute")
 _MESH_STAGES = ("VSIn", "VSOut", "GSOut", "TaskOut", "MeshOut")
@@ -852,6 +891,991 @@ def _op_get_buffer_data(controller, rd, params, context):
         "output_file": output_file or None,
         "size_bytes": int(os.path.getsize(output_file)) if output_file else None,
     }
+
+
+def _find_texture(controller, resource_id):
+    """Look one texture up among the capture's textures, or raise."""
+    wanted = _int(resource_id)
+    if wanted <= 0:
+        raise ValueError("resource_id must be a positive integer")
+    for texture in controller.GetTextures():
+        if _int(getattr(texture, "resourceId", 0)) == wanted:
+            return texture
+    raise ValueError("texture {} is not present in this capture".format(wanted))
+
+
+def _level_size(texture, mip):
+    """Mip dimensions, halved the way GPUs clamp, never below one texel."""
+    width = max(1, _int(getattr(texture, "width", 0)) >> mip)
+    height = max(1, _int(getattr(texture, "height", 0)) >> mip)
+    return width, height
+
+
+def _format_facts(rd, fmt):
+    """Describe one texture format well enough to sample its texels.
+
+    Block-compressed, packed, and special formats are reported as undecodable
+    rather than sampled wrongly: their bytes are blocks or packed bits, not one
+    texel every ``element_byte_size`` bytes.
+    """
+    del rd
+    name = _text(fmt.Name()) if hasattr(fmt, "Name") else ""
+    comp_count = _int(getattr(fmt, "compCount", 0))
+    comp_byte_width = _int(getattr(fmt, "compByteWidth", 0))
+    element = _int(getattr(fmt, "elementByteSize", 0))
+    if element <= 0:
+        element = comp_count * comp_byte_width
+    comp_type = _enum(getattr(fmt, "compType", ""))
+    special = _int(getattr(fmt, "special", 0))
+    facts = {
+        "name": name,
+        "comp_count": comp_count,
+        "comp_byte_width": comp_byte_width,
+        "element_byte_size": element,
+        "comp_type": comp_type,
+        "special": special,
+    }
+    reason = None
+    if comp_count < 1 or comp_count > 4:
+        reason = "the format reports {} component(s) per texel; only 1-4 are sampled".format(
+            comp_count
+        )
+    elif comp_byte_width not in (1, 2, 4, 8):
+        reason = "the format reports a {}-byte component, which no decoder here covers".format(
+            comp_byte_width
+        )
+    elif element != comp_count * comp_byte_width:
+        reason = (
+            "the format packs {} component(s) into {} byte(s), so texels are not "
+            "evenly spaced".format(comp_count, element)
+        )
+    elif special:
+        reason = "the format is special-encoded ({}) and its bytes are not raw components".format(
+            name or "unknown"
+        )
+    elif comp_type not in _DECODABLE_COMP_TYPES:
+        reason = "component type {} has no numeric decoder".format(comp_type or "unknown")
+    facts["decodable"] = reason is None
+    facts["reason"] = reason
+    return facts
+
+
+def _is_inf(value):
+    return value == float("inf") or value == float("-inf")
+
+
+def _decode_texel(raw, offset, facts):
+    """Decode one texel into floats, or ``None`` when it cannot be decoded.
+
+    Values are returned as floats for every format so one payload can carry
+    them; a 64-bit integer therefore comes back rounded, which is why the
+    caller reports ``value_kind`` alongside them.
+    """
+    if not facts["decodable"]:
+        return None
+    comp_count = facts["comp_count"]
+    byte_width = facts["comp_byte_width"]
+    comp_type = facts["comp_type"]
+    values = []
+    for index in range(comp_count):
+        start = offset + index * byte_width
+        if start + byte_width > len(raw):
+            return None
+        chunk = raw[start : start + byte_width]
+        if comp_type == "CompType.Float":
+            code = _FLOAT_CODES.get(byte_width)
+            if code is None:
+                return None
+            values.append(float(struct.unpack("<" + code, chunk)[0]))
+            continue
+        signed = comp_type in ("CompType.SInt", "CompType.SNorm")
+        number = int(struct.unpack("<" + _INT_CODES[(byte_width, signed)], chunk)[0])
+        if comp_type == "CompType.SNorm":
+            # The negative extreme of a signed normalised format is one step
+            # wider than the positive one, so it is clamped to -1 instead of
+            # decoding past it the way a raw divide would.
+            values.append(max(-1.0, float(number) / float((1 << (byte_width * 8 - 1)) - 1)))
+        elif comp_type in ("CompType.UNorm", "CompType.UNormSRGB"):
+            values.append(float(number) / float((1 << (byte_width * 8)) - 1))
+        else:
+            values.append(float(number))
+    return values
+
+
+def _channel_stats(comp_count):
+    """Per-channel accumulators shared by the sampling and diagnosis ops."""
+    return [
+        {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "finite_sum": 0.0,
+            "finite_count": 0,
+            "nan_count": 0,
+            "inf_count": 0,
+            "negative_count": 0,
+        }
+        for _ in range(comp_count)
+    ]
+
+
+def _accumulate(stats, values):
+    """Fold one decoded texel into the per-channel accumulators."""
+    for index, value in enumerate(values):
+        if index >= len(stats):
+            break
+        bucket = stats[index]
+        if value != value:
+            bucket["nan_count"] += 1
+            continue
+        if _is_inf(value):
+            bucket["inf_count"] += 1
+            continue
+        bucket["finite_count"] += 1
+        bucket["finite_sum"] += float(value)
+        if value < 0:
+            bucket["negative_count"] += 1
+        if bucket["min"] is None or value < bucket["min"]:
+            bucket["min"] = value
+        if bucket["max"] is None or value > bucket["max"]:
+            bucket["max"] = value
+
+
+def _finish_stats(stats):
+    """Turn the accumulators into the reported min, max, and mean."""
+    for bucket in stats:
+        total = bucket.pop("finite_count")
+        summed = bucket.pop("finite_sum")
+        bucket["mean"] = float(summed / total) if total else None
+        bucket["finite_texel_count"] = total
+    return stats
+
+
+def _region_extent(texture, mip, params):
+    """Clamp the requested region into the mip level's bounds."""
+    level_width, level_height = _level_size(texture, mip)
+    x = _clamp(params.get("x"), 0, max(0, level_width - 1), 0)
+    y = _clamp(params.get("y"), 0, max(0, level_height - 1), 0)
+    # The clamp has to end at the level edge, not at the level size: a region
+    # that starts at x=1 of a 2-wide level is one texel wide, not two. The
+    # default is the same edge, so an omitted width means "to the end".
+    width = _clamp(params.get("width"), 1, max(1, level_width - x), max(1, level_width - x))
+    height = _clamp(params.get("height"), 1, max(1, level_height - y), max(1, level_height - y))
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "level_width": level_width,
+        "level_height": level_height,
+    }
+
+
+def _read_region(controller, rd, texture, mip, slice_index, sample_index):
+    """Read one mip level back and guard against an unexpected byte count."""
+    sub = rd.Subresource()
+    sub.mip = mip
+    sub.slice = slice_index
+    sub.sample = sample_index
+    raw = controller.GetTextureData(texture.resourceId, sub)
+    raw = bytes(raw) if raw is not None else b""
+    if len(raw) > MAX_REGION_BYTES:
+        raise ValueError(
+            "mip {} of this texture is {} byte(s), above the {} byte readback "
+            "ceiling; sample a smaller mip or a smaller texture".format(
+                mip, len(raw), MAX_REGION_BYTES
+            )
+        )
+    return raw
+
+
+def _unsupported_region(base, message, hint):
+    """Report a region that cannot be sampled without pretending it was empty."""
+    base.update(
+        {
+            "supported": False,
+            "error_message": message,
+            "hint": hint,
+            "samples": [],
+            "stats": None,
+        }
+    )
+    return base
+
+
+def _op_sample_pixel_region(controller, rd, params, context):
+    """Sample a rectangular region of one texture or render target on a grid.
+
+    ``GetTextureData`` reads a whole mip level back, so the region and the grid
+    are applied to the bytes RenderDoc returned. The grid is what keeps a 4K
+    target affordable, and it is also what makes the statistics a sample
+    rather than a census whenever the grid is coarser than the region -- the
+    payload says which of the two it is instead of leaving the caller to guess.
+    """
+    del context
+    event_id = _set_event(controller, params.get("event_id"))
+    texture = _find_texture(controller, _int(params.get("resource_id")))
+    mip = _clamp(params.get("mip"), 0, 64, 0)
+    slice_index = _clamp(params.get("slice"), 0, 65535, 0)
+    sample_index = _clamp(params.get("sample"), 0, 65535, 0)
+    region = _region_extent(texture, mip, params)
+    grid_x = _clamp(params.get("grid_x"), 1, MAX_REGION_GRID, 1)
+    grid_y = _clamp(params.get("grid_y"), 1, MAX_REGION_GRID, 1)
+    max_samples = _clamp(params.get("max_samples"), 1, MAX_REGION_SAMPLES, 256)
+    facts = _format_facts(rd, texture.format)
+    region.update(
+        {
+            "mip": mip,
+            "slice": slice_index,
+            "sample": sample_index,
+            "grid_x": grid_x,
+            "grid_y": grid_y,
+        }
+    )
+    base = {
+        "event_id": event_id,
+        "resource_id": _int(getattr(texture, "resourceId", 0)),
+        "resource_name": _text(getattr(texture, "name", "")),
+        "format": facts,
+        "region": region,
+        "value_kind": "float",
+    }
+    if not facts["decodable"]:
+        return _unsupported_region(
+            base,
+            "this texture's format cannot be sampled: {}".format(facts["reason"]),
+            "sample a texture with an uncompressed numeric format, or export it with "
+            "get_texture_data first",
+        )
+    element = facts["element_byte_size"]
+    raw = _read_region(controller, rd, texture, mip, slice_index, sample_index)
+    expected = region["level_width"] * region["level_height"] * element
+    if len(raw) < expected:
+        return _unsupported_region(
+            base,
+            "RenderDoc returned {} byte(s) for a {}x{} level of {}-byte texels".format(
+                len(raw), region["level_width"], region["level_height"], element
+            ),
+            "the format may be block-compressed; try another mip or export the texture "
+            "with get_texture_data",
+        )
+    stats = _channel_stats(facts["comp_count"])
+    points = []
+    for row in range(grid_y):
+        sy = region["y"] + min(
+            region["height"] - 1, ((2 * row + 1) * region["height"]) // (2 * grid_y)
+        )
+        for column in range(grid_x):
+            sx = region["x"] + min(
+                region["width"] - 1, ((2 * column + 1) * region["width"]) // (2 * grid_x)
+            )
+            values = _decode_texel(raw, (sy * region["level_width"] + sx) * element, facts)
+            if values is None:
+                continue
+            _accumulate(stats, values)
+            if len(points) < MAX_REGION_SAMPLES:
+                points.append({"x": sx, "y": sy, "values": values})
+    grid_texels = grid_x * grid_y
+    region_texels = region["width"] * region["height"]
+    exhaustive = grid_texels >= region_texels
+    base.update(
+        {
+            "supported": True,
+            "sampled": not exhaustive,
+            "estimate": not exhaustive,
+            "estimate_method": None
+            if exhaustive
+            else "min, max, and mean over a {}x{} grid of the {}x{} region, not over "
+            "every texel".format(grid_x, grid_y, region["width"], region["height"]),
+            "sample_count": len(points),
+            "samples_returned": min(len(points), max_samples),
+            "samples_truncated": len(points) > max_samples,
+            "grid_texel_count": grid_texels,
+            "region_texel_count": region_texels,
+            "samples": points[:max_samples],
+            "stats": {"texel_count": len(points), "channels": _finish_stats(stats)},
+        }
+    )
+    return base
+
+
+def _check_definitions(facts):
+    """Describe which anomaly checks this format can answer, and why.
+
+    NaN and Inf only exist in a floating-point format, and a negative value is
+    only a signal in one: an unsigned or normalised integer is never negative
+    and a signed one is negative by design. Saying so per check is more useful
+    than reporting four zeros.
+    """
+    comp_type = facts["comp_type"]
+    float_format = comp_type == "CompType.Float"
+    if float_format:
+        integer_reason = None
+    elif comp_type in ("CompType.UNorm", "CompType.UNormSRGB", "CompType.UInt"):
+        integer_reason = "{} carries no floating-point channel, so it cannot be NaN or Inf".format(
+            comp_type
+        )
+    else:
+        integer_reason = "{} is an integer format".format(comp_type)
+    if float_format:
+        negative_reason = None
+    elif comp_type in ("CompType.SInt", "CompType.SNorm"):
+        negative_reason = "{} is signed, so negative values are in range by design".format(
+            comp_type
+        )
+    else:
+        negative_reason = "{} cannot encode a negative value".format(comp_type)
+    return {
+        "nan": {"applicable": float_format, "reason": integer_reason, "count": 0, "samples": []},
+        "inf": {"applicable": float_format, "reason": integer_reason, "count": 0, "samples": []},
+        "negative": {
+            "applicable": float_format,
+            "reason": negative_reason,
+            "count": 0,
+            "samples": [],
+        },
+        "precision": {
+            "applicable": float_format,
+            "reason": integer_reason,
+            "count": 0,
+            "tiny_count": 0,
+            "huge_count": 0,
+            "samples": [],
+        },
+    }
+
+
+def _record_anomaly(check, x, y, channel, value, limit, kind=None):
+    """Add one anomaly coordinate to a check, bounded per check."""
+    if len(check["samples"]) >= limit:
+        return
+    entry = {"x": x, "y": y, "channel": channel, "value": value}
+    if kind is not None:
+        entry["kind"] = kind
+    check["samples"].append(entry)
+
+
+def _op_diagnose_pixel_values(controller, rd, params, context):
+    """Scan a region for NaN, Inf, negative, and out-of-band float values.
+
+    RenderDoc exposes no anomaly scanner, so this one walks the decoded texels
+    itself. A 4K target is eight million texels, too many to walk through a
+    Python loop at agent-interactive speed, so the scan strides by ``step``
+    when the region is larger than ``max_texels`` and reports both the stride
+    and the fact that the counts are then a sample of the region.
+    """
+    del context
+    event_id = _set_event(controller, params.get("event_id"))
+    texture = _find_texture(controller, _int(params.get("resource_id")))
+    mip = _clamp(params.get("mip"), 0, 64, 0)
+    slice_index = _clamp(params.get("slice"), 0, 65535, 0)
+    sample_index = _clamp(params.get("sample"), 0, 65535, 0)
+    region = _region_extent(texture, mip, params)
+    max_texels = _clamp(params.get("max_texels"), 1, MAX_DIAGNOSE_TEXELS, MAX_DIAGNOSE_TEXELS)
+    max_anomalies = _clamp(params.get("max_anomalies"), 1, MAX_ANOMALY_SAMPLES, 32)
+    requested = params.get("checks") or list(_PIXEL_CHECKS)
+    selected = [name for name in _PIXEL_CHECKS if name in requested]
+    if not selected:
+        raise ValueError("checks must name at least one of: " + ", ".join(_PIXEL_CHECKS))
+    facts = _format_facts(rd, texture.format)
+    raw = b""
+    element = facts["element_byte_size"]
+    if facts["decodable"] and element > 0:
+        raw = _read_region(controller, rd, texture, mip, slice_index, sample_index)
+    step = 1
+    while step < 4096:
+        rows = (region["height"] + step - 1) // step
+        columns = (region["width"] + step - 1) // step
+        if rows * columns <= max_texels:
+            break
+        step += 1
+    region.update(
+        {
+            "mip": mip,
+            "slice": slice_index,
+            "sample": sample_index,
+            "step": step,
+            "scan_columns": (region["width"] + step - 1) // step,
+            "scan_rows": (region["height"] + step - 1) // step,
+        }
+    )
+    base = {
+        "event_id": event_id,
+        "resource_id": _int(getattr(texture, "resourceId", 0)),
+        "resource_name": _text(getattr(texture, "name", "")),
+        "format": facts,
+        "region": region,
+        "checks_requested": selected,
+    }
+    if not facts["decodable"] or element <= 0:
+        base.update(
+            {
+                "supported": False,
+                "error_message": "this texture's format cannot be diagnosed: {}".format(
+                    facts["reason"]
+                ),
+                "hint": "diagnose a texture with an uncompressed numeric format",
+                "scanned_texels": 0,
+                "anomaly_texel_count": 0,
+                "clean": True,
+                "stats": None,
+            }
+        )
+        return base
+    definitions = _check_definitions(facts)
+    stats = _channel_stats(facts["comp_count"])
+    scanned = 0
+    anomaly_texels = 0
+    for sy in range(region["y"], region["y"] + region["height"], step):
+        row_offset = sy * region["level_width"]
+        for sx in range(region["x"], region["x"] + region["width"], step):
+            values = _decode_texel(raw, (row_offset + sx) * element, facts)
+            if values is None:
+                continue
+            scanned += 1
+            _accumulate(stats, values)
+            flagged = False
+            for channel, value in enumerate(values):
+                missing = value != value
+                infinite = not missing and _is_inf(value)
+                if missing and definitions["nan"]["applicable"]:
+                    if "nan" in selected:
+                        definitions["nan"]["count"] += 1
+                        _record_anomaly(definitions["nan"], sx, sy, channel, value, max_anomalies)
+                    flagged = True
+                if infinite and definitions["inf"]["applicable"]:
+                    if "inf" in selected:
+                        definitions["inf"]["count"] += 1
+                        _record_anomaly(definitions["inf"], sx, sy, channel, value, max_anomalies)
+                    flagged = True
+                if not missing and not infinite and value < 0:
+                    negative = definitions["negative"]
+                    if "negative" in selected and negative["applicable"]:
+                        negative["count"] += 1
+                        _record_anomaly(negative, sx, sy, channel, value, max_anomalies)
+                        flagged = True
+                precision = definitions["precision"]
+                if (
+                    "precision" in selected
+                    and precision["applicable"]
+                    and not missing
+                    and not infinite
+                    and value != 0.0
+                ):
+                    magnitude = abs(value)
+                    if magnitude < FLOAT_TINY:
+                        precision["tiny_count"] += 1
+                        precision["count"] += 1
+                        _record_anomaly(precision, sx, sy, channel, value, max_anomalies, "tiny")
+                        flagged = True
+                    elif magnitude > FLOAT_HUGE:
+                        precision["huge_count"] += 1
+                        precision["count"] += 1
+                        _record_anomaly(precision, sx, sy, channel, value, max_anomalies, "huge")
+                        flagged = True
+            if flagged:
+                anomaly_texels += 1
+    checks = {}
+    for name in selected:
+        check = dict(definitions[name])
+        if not check["applicable"]:
+            check["count"] = 0
+            check["samples"] = []
+        else:
+            check["samples_truncated"] = check["count"] > len(check["samples"])
+            check["max_anomalies"] = max_anomalies
+        checks[name] = check
+    sampled = step > 1
+    base.update(
+        {
+            "supported": True,
+            "scanned_texels": scanned,
+            "region_texel_count": region["width"] * region["height"],
+            "sampled": sampled,
+            "estimate": sampled,
+            "estimate_method": None
+            if not sampled
+            else "every {}. texel of the region was scanned, so the counts are a "
+            "sample of {} texel(s), not a census".format(step, region["width"] * region["height"]),
+            "checks": checks,
+            "anomaly_texel_count": anomaly_texels,
+            "clean": anomaly_texels == 0,
+            "stats": {"texel_count": scanned, "channels": _finish_stats(stats)},
+        }
+    )
+    return base
+
+
+def _flag_bit(rd, name):
+    """One ``ActionFlags`` bit by name, or 0 when this build lacks the member."""
+    enum = getattr(rd, "ActionFlags", None)
+    if enum is None:
+        return 0
+    return _int(getattr(enum, name, 0), 0)
+
+
+def _action_kind(rd, action):
+    """Classify one action for the counters the analysis ops report."""
+    flags = _int(getattr(action, "flags", 0))
+    if flags & _flag_bit(rd, "Drawcall"):
+        return "draw"
+    if flags & _flag_bit(rd, "Dispatch"):
+        return "dispatch"
+    if flags & _flag_bit(rd, "Clear"):
+        return "clear"
+    return "other"
+
+
+def _new_pass_stats():
+    """Accumulators for one pass subtree."""
+    return {
+        "action_count": 0,
+        "draw_count": 0,
+        "dispatch_count": 0,
+        "clear_count": 0,
+        "other_count": 0,
+        "total_indices": 0,
+        "total_instances": 0,
+        "triangle_estimate": 0,
+        "outputs": set(),
+        "depth_outputs": set(),
+        "first_event_id": None,
+        "last_event_id": None,
+        "actions": [],
+    }
+
+
+def _finish_pass_stats(stats):
+    """Render one pass accumulator as JSON, sets included."""
+    stats["outputs"] = sorted(stats["outputs"])
+    stats["depth_outputs"] = sorted(stats["depth_outputs"])
+    return stats
+
+
+def _accumulate_pass(controller, rd, action, stats, max_actions):
+    """Fold one action subtree into a pass accumulator.
+
+    ``numIndices`` and ``numInstances`` are what the API recorded, so a triangle
+    count derived from them counts everything the draw asked for: it is before
+    culling, clipping, and the vertex shader, which is why it is reported as an
+    estimate with its method attached rather than as a measured count.
+    """
+    structured = None
+    try:
+        structured = controller.GetStructuredFile()
+    except BaseException:
+        structured = None
+    stack = [action]
+    while stack:
+        node = stack.pop()
+        event_id = _int(getattr(node, "eventId", 0))
+        stats["action_count"] += 1
+        if stats["first_event_id"] is None or event_id < stats["first_event_id"]:
+            stats["first_event_id"] = event_id
+        if stats["last_event_id"] is None or event_id > stats["last_event_id"]:
+            stats["last_event_id"] = event_id
+        kind = _action_kind(rd, node)
+        stats[kind + "_count"] += 1
+        indices = _int(getattr(node, "numIndices", 0))
+        instances = max(1, _int(getattr(node, "numInstances", 0)))
+        if kind == "draw":
+            # Only draws carry geometry. A clear reports an index count too, and
+            # counting it would inflate every triangle estimate in the frame.
+            stats["total_indices"] += indices
+            stats["total_instances"] += instances
+            stats["triangle_estimate"] += (indices // 3) * instances
+        for target in getattr(node, "outputs", []) or []:
+            target_id = _int(target)
+            if target_id:
+                stats["outputs"].add(target_id)
+        depth = _int(getattr(node, "depthOut", 0))
+        if depth:
+            stats["depth_outputs"].add(depth)
+        if len(stats["actions"]) < max_actions:
+            name = ""
+            try:
+                name = str(node.GetName(structured)) if structured is not None else ""
+            except BaseException:
+                name = ""
+            stats["actions"].append(
+                {
+                    "event_id": event_id,
+                    "name": name or _text(getattr(node, "customName", "")),
+                    "kind": kind,
+                    "num_indices": indices,
+                    "num_instances": instances,
+                }
+            )
+        stack.extend(getattr(node, "children", []) or [])
+
+
+def _texture_inventory(controller, limit):
+    """Report the capture's textures by size and by format."""
+    entries = []
+    formats = {}
+    total_bytes = 0
+    for texture in controller.GetTextures():
+        width = _int(getattr(texture, "width", 0))
+        height = max(1, _int(getattr(texture, "height", 0)))
+        depth = max(1, _int(getattr(texture, "depth", 0)))
+        arraysize = max(1, _int(getattr(texture, "arraysize", 0)))
+        mips = max(1, _int(getattr(texture, "mips", 0)))
+        byte_size = _int(getattr(texture, "byteSize", 0))
+        if byte_size <= 0:
+            byte_size = width * height * depth * arraysize * 4
+        total_bytes += byte_size
+        name = ""
+        try:
+            name = _text(texture.format.Name())
+        except BaseException:
+            name = ""
+        formats[name] = formats.get(name, 0) + 1
+        entries.append(
+            {
+                "resource_id": _int(getattr(texture, "resourceId", 0)),
+                "name": _text(getattr(texture, "name", "")),
+                "width": width,
+                "height": height,
+                "depth": depth,
+                "arraysize": arraysize,
+                "mips": mips,
+                "format": name,
+                "byte_size": byte_size,
+            }
+        )
+    entries.sort(key=lambda entry: entry["byte_size"], reverse=True)
+    ranked_formats = sorted(formats.items(), key=lambda item: item[1], reverse=True)
+    return {
+        "total_texture_bytes": total_bytes,
+        "largest_textures": entries[:limit],
+        "largest_textures_truncated": len(entries) > limit,
+        "formats": [{"format": name, "count": count} for name, count in ranked_formats[:limit]],
+        "format_count": len(formats),
+    }
+
+
+def _replay_message_report(controller, event_id, limit):
+    """Count the messages a replay up to ``event_id`` produced, by severity."""
+    if event_id is None:
+        return {"unavailable": "the capture reports no event to replay to", "count": None}
+    try:
+        _set_event(controller, event_id)
+        messages = controller.GetDebugMessages()
+    except BaseException as exc:
+        return {"unavailable": "{}: {}".format(type(exc).__name__, exc), "count": None}
+    by_severity = {}
+    samples = []
+    for message in messages:
+        severity = _enum(getattr(message, "severity", ""))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        if len(samples) < limit:
+            samples.append(
+                {
+                    "event_id": _int(getattr(message, "eventId", 0)),
+                    "category": _enum(getattr(message, "category", "")),
+                    "severity": severity,
+                    "source": _enum(getattr(message, "source", "")),
+                    "id": _int(getattr(message, "messageID", 0)),
+                    "description": _text(getattr(message, "description", "")),
+                }
+            )
+    return {
+        "event_id": event_id,
+        "count": len(messages),
+        "by_severity": by_severity,
+        "samples": samples,
+        "samples_truncated": len(messages) > limit,
+    }
+
+
+def _counter_report(controller):
+    """Report whether this capture exposes counters, and one that carries time."""
+    try:
+        entries = _counter_descriptions(controller, controller.EnumerateCounters())
+    except BaseException as exc:
+        return {"unavailable": "{}: {}".format(type(exc).__name__, exc), "counter_count": None}
+    timing = _find_timing_counter(entries)
+    return {
+        "counter_count": len(entries),
+        "timing_counter": None if timing is None else timing[1],
+    }
+
+
+def _overview_signals(described, totals, textures, counters, messages):
+    """Turn the overview facts into the signals an agent would otherwise miss.
+
+    Every signal is a heuristic over structure: none of them is a measurement,
+    so each one carries its basis and the payload says so once at the top.
+    """
+    signals = []
+
+    def add(code, severity, detail):
+        signals.append({"code": code, "severity": severity, "detail": detail, "basis": "heuristic"})
+
+    capabilities = described.get("capabilities") or {}
+    if capabilities.get("degraded"):
+        add(
+            "degraded_replay",
+            "warning",
+            "this capture is replaying in a degraded (remote or fallback) mode, so "
+            "some readbacks are unavailable",
+        )
+    if not described.get("action_count"):
+        add("no_actions", "warning", "the capture contains no actions to inspect")
+    elif not totals["draw_count"]:
+        add("no_draws", "warning", "the capture contains no draw calls")
+    if totals["draw_count"] > 1000:
+        add(
+            "high_draw_count",
+            "info",
+            "the frame issues {} draw(s); consider analyze_render_passes to find "
+            "where they cluster".format(totals["draw_count"]),
+        )
+    if counters.get("counter_count") == 0:
+        add(
+            "no_counters",
+            "info",
+            "this driver exposes no GPU counters, so counter and timing tools have "
+            "nothing to sample here",
+        )
+    elif counters.get("counter_count") and not counters.get("timing_counter"):
+        add(
+            "no_timing_counter",
+            "info",
+            "this driver exposes {} counter(s) but none of them carries GPU "
+            "duration, so per-pass timing cannot be measured here".format(
+                counters["counter_count"]
+            ),
+        )
+    if messages.get("count"):
+        add(
+            "debug_messages",
+            "warning",
+            "the replay produced {} debug message(s); get_debug_messages lists them".format(
+                messages["count"]
+            ),
+        )
+    for texture in textures.get("largest_textures") or []:
+        if texture["byte_size"] >= 64 * 1024 * 1024:
+            add(
+                "large_texture",
+                "info",
+                "{} is {} byte(s); it dominates the capture's texture memory".format(
+                    texture["name"], texture["byte_size"]
+                ),
+            )
+            break
+    return signals
+
+
+def _op_get_frame_overview(controller, rd, params, context):
+    """Answer "what is in this capture" in one replay instead of six.
+
+    The pieces are the ones the other tools already expose individually; what
+    this op adds is the join and the signals -- the facts that are only visible
+    once the pieces sit next to each other, such as a frame with no draws or a
+    driver with counters but no duration counter.
+    """
+    max_passes = _clamp(params.get("max_passes"), 1, 512, 32)
+    max_textures = _clamp(params.get("max_textures"), 1, MAX_ITEMS, 8)
+    max_actions = _clamp(params.get("max_actions_per_pass"), 0, MAX_ITEMS, 5)
+    max_messages = _clamp(params.get("max_messages"), 0, MAX_ITEMS, 8)
+    described = _op_describe_capture(controller, rd, {}, context)
+    roots = controller.GetRootActions()
+    totals = _new_pass_stats()
+    passes = []
+    for action in roots:
+        stats = _new_pass_stats()
+        _accumulate_pass(controller, rd, action, stats, max_actions)
+        for key in (
+            "action_count",
+            "draw_count",
+            "dispatch_count",
+            "clear_count",
+            "other_count",
+            "total_indices",
+            "total_instances",
+            "triangle_estimate",
+        ):
+            totals[key] += stats[key]
+        totals["outputs"].update(stats["outputs"])
+        totals["depth_outputs"].update(stats["depth_outputs"])
+        if len(passes) < max_passes:
+            name = _text(getattr(action, "customName", ""))
+            entry = {
+                "event_id": _int(getattr(action, "eventId", 0)),
+                "name": name,
+            }
+            entry.update(_finish_pass_stats(stats))
+            passes.append(entry)
+    textures = _texture_inventory(controller, max_textures)
+    counters = _counter_report(controller)
+    messages = (
+        _replay_message_report(controller, described.get("last_event_id"), max_messages)
+        if params.get("include_debug_messages", True)
+        else {"unavailable": "include_debug_messages was false", "count": None}
+    )
+    totals_finished = _finish_pass_stats(totals)
+    del totals_finished["actions"]
+    del totals_finished["first_event_id"]
+    del totals_finished["last_event_id"]
+    return {
+        "capabilities": described.get("capabilities"),
+        "api_properties": described.get("api_properties"),
+        "frame_info": described.get("frame_info"),
+        "actions": {
+            "action_count": described.get("action_count"),
+            "root_action_count": described.get("root_action_count"),
+            "first_event_id": described.get("first_event_id"),
+            "last_event_id": described.get("last_event_id"),
+            "draw_count": totals_finished["draw_count"],
+            "dispatch_count": totals_finished["dispatch_count"],
+            "clear_count": totals_finished["clear_count"],
+            "other_count": totals_finished["other_count"],
+        },
+        "resources": {
+            "resource_count": described.get("resource_count"),
+            "texture_count": described.get("texture_count"),
+            "buffer_count": described.get("buffer_count"),
+            "total_texture_bytes": textures["total_texture_bytes"],
+            "largest_textures": textures["largest_textures"],
+            "largest_textures_truncated": textures["largest_textures_truncated"],
+            "formats": textures["formats"],
+            "format_count": textures["format_count"],
+        },
+        "pass_count": len(roots),
+        "passes": passes,
+        "passes_truncated": len(roots) > max_passes,
+        "counters": counters,
+        "debug_messages": messages,
+        "signals": _overview_signals(described, totals_finished, textures, counters, messages),
+        "estimate_fields": {
+            "passes[].triangle_estimate": "numIndices / 3 * numInstances, counted before "
+            "GPU culling, clipping, and vertex shading",
+            "resources.total_texture_bytes": "sum of the texture byte sizes RenderDoc "
+            "reported, not a measurement of GPU memory",
+            "signals": "heuristics over the capture's structure, not measurements",
+        },
+    }
+
+
+def _locate_action(actions, event_id, depth=0, parent=None):
+    """Find one action together with its depth and parent event id."""
+    for action in actions:
+        if _int(getattr(action, "eventId", 0)) == event_id:
+            return action, depth, parent
+        found = _locate_action(
+            getattr(action, "children", []) or [], event_id, depth + 1, _int(action.eventId)
+        )
+        if found is not None:
+            return found
+    return None
+
+
+def _bound_stages(pipeline_state):
+    """The shader stages the pipeline state reports a shader bound to."""
+    stages = []
+    for entry in (pipeline_state or {}).get("shaders") or []:
+        if isinstance(entry, dict) and entry.get("resource_id"):
+            stages.append(entry.get("stage"))
+    return [stage for stage in stages if stage]
+
+
+def _op_get_draw_call_state(controller, rd, params, context):
+    """Snapshot everything one draw was executed with, in one replay.
+
+    The three reads this joins already exist as separate tools; an agent that
+    wants to know what a draw did otherwise pays three round trips and then has
+    to line the results up by event id. The per-stage shader reads are wrapped
+    individually so one stage this capture cannot reflect does not cost the
+    caller the other stages.
+    """
+    event_id = _int(params.get("event_id"))
+    located = _locate_action(controller.GetRootActions(), event_id)
+    if located is None:
+        raise ValueError("event {} was not found".format(event_id))
+    _action, depth, parent = located
+    action = _op_get_action(controller, rd, {"event_id": event_id}, context)
+    action["depth"] = depth
+    action["parent_event_id"] = parent
+    pipeline_state = _op_get_pipeline_state(controller, rd, {"event_id": event_id}, context)
+    requested = params.get("stages") or _bound_stages(pipeline_state)
+    include_constant_buffers = bool(params.get("include_constant_buffers", False))
+    include_source = bool(params.get("include_source", False))
+    variable_limit = _clamp(params.get("variable_limit"), 1, MAX_ITEMS, 64)
+    shaders = []
+    unavailable = list(pipeline_state.get("unavailable_sections") or [])
+    for stage_name in requested:
+        stage = _stage(rd, _text(stage_name))
+        if stage is None:
+            shaders.append(
+                {
+                    "stage": _text(stage_name),
+                    "requested_stage": _text(stage_name),
+                    "bound": False,
+                    "error": "unsupported shader stage",
+                }
+            )
+            continue
+        try:
+            info = _op_get_shader_info(
+                controller,
+                rd,
+                {
+                    "event_id": event_id,
+                    "stage": _text(stage_name),
+                    "include_constant_buffers": include_constant_buffers,
+                    "include_source": include_source,
+                    "variable_limit": variable_limit,
+                },
+                context,
+            )
+        except BaseException as exc:
+            unavailable.append("shader_info." + _text(stage_name))
+            info = {
+                "stage": _text(stage_name),
+                "bound": False,
+                "error": "{}: {}".format(type(exc).__name__, exc),
+            }
+        # A bound shader reports its stage through RenderDoc's own enum, so the
+        # name the caller asked for is carried alongside it: the list is then
+        # keyed the same way whether or not the stage could be reflected.
+        info["requested_stage"] = _text(stage_name)
+        shaders.append(info)
+    read_only = pipeline_state.get("read_only_resources") or {}
+    read_write = pipeline_state.get("read_write_resources") or {}
+    summary = {
+        "event_id": event_id,
+        "name": action.get("name"),
+        "flag_names": action.get("flag_names"),
+        "num_indices": action.get("num_indices"),
+        "num_instances": action.get("num_instances"),
+        "primitive_topology": pipeline_state.get("primitive_topology"),
+        "outputs": action.get("outputs"),
+        "depth_out": action.get("depth_out"),
+        "shader_stages": [entry.get("requested_stage") for entry in shaders],
+        "shader_count": len([entry for entry in shaders if entry.get("bound")]),
+        "texture_binding_count": _binding_count(read_only),
+        "read_write_binding_count": _binding_count(read_write),
+        "vertex_buffer_count": len(pipeline_state.get("vertex_buffers") or []),
+    }
+    return {
+        "event_id": event_id,
+        "action": action,
+        "pipeline_state": pipeline_state,
+        "shaders": shaders,
+        "summary": summary,
+        "unavailable_sections": unavailable,
+    }
+
+
+def _binding_count(bindings):
+    """Count the resource bindings the pipeline state reported across stages."""
+    total = 0
+    for stage_bindings in bindings.values():
+        if isinstance(stage_bindings, list):
+            total += len(stage_bindings)
+    return total
 
 
 def _decode_vertices(raw, stride, comp_count, limit=MAX_VERTICES):
@@ -2166,6 +3190,10 @@ OPERATIONS = {
     "get_shader_info": _op_get_shader_info,
     "get_texture_data": _op_get_texture_data,
     "get_buffer_data": _op_get_buffer_data,
+    "sample_pixel_region": _op_sample_pixel_region,
+    "diagnose_pixel_values": _op_diagnose_pixel_values,
+    "get_frame_overview": _op_get_frame_overview,
+    "get_draw_call_state": _op_get_draw_call_state,
     "get_mesh_data": _op_get_mesh_data,
     "export_mesh": _op_export_mesh,
     "pick_pixel": _op_pick_pixel,

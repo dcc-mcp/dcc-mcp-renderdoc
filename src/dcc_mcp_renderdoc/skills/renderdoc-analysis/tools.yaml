@@ -102,4 +102,120 @@ tools:
     next-tools:
       on-success: [renderdoc_analysis__inspect_capture]
       on-failure: [renderdoc_capture__get_version, dcc_diagnostics__audit_log]
+  - name: sample_pixel_region
+    description: Sample a rectangular region of one texture or render target on a grid and report per sample its coordinates and decoded channel values, plus per-channel min, max, and mean over the samples. event_id replays to that event first, so the readback is the target's contents at that point in the frame. Requires an uncompressed numeric format: block-compressed, packed, and special formats come back as a structured unsupported result naming the reason instead of sampled zeros. The grid decides how much of the region is read, so a grid coarser than the region makes the statistics a sampled estimate, which the payload reports in estimate and estimate_method. Use before reasoning about what a region contains, and as the primitive diagnose_pixel_values scans. Not for one pixel's value - use renderdoc_inspect__get_texture_data with include_pixels, or renderdoc_debug__pick_pixel to find which draw touched it.
+    input_schema:
+      type: object
+      required: [capture_file, resource_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        resource_id: {type: integer, minimum: 1}
+        x: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        y: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        width: {type: integer, minimum: 1, maximum: 65536}
+        height: {type: integer, minimum: 1, maximum: 65536}
+        grid_x: {type: integer, minimum: 1, maximum: 64, default: 1}
+        grid_y: {type: integer, minimum: 1, maximum: 64, default: 1}
+        mip: {type: integer, minimum: 0, maximum: 64, default: 0}
+        slice_index: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        sample: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        event_id: {type: integer, minimum: 1}
+        max_samples: {type: integer, minimum: 1, maximum: 4096, default: 256}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/sample_pixel_region.py
+    next-tools:
+      on-success: [renderdoc_analysis__diagnose_pixel_values, renderdoc_inspect__get_texture_data]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: diagnose_pixel_values
+    description: Scan a region of one texture or render target for NaN, Inf, negative, and out-of-band float values, returning per check how many values matched, up to max_anomalies coordinates per check, per-channel statistics, and an overall anomaly texel count. event_id replays to that event first. NaN and Inf only exist in a floating-point format and a negative value is only a signal in one, so an integer format reports each check as not applicable with the reason rather than as four zeros. Regions larger than max_texels are scanned with a stride, and the payload then reports the stride, the sampled flag, and the estimate method. Use to find where a frame starts producing garbage before debugging a single pixel. Not for why one pixel has the value it has - use renderdoc_debug__pixel_history.
+    input_schema:
+      type: object
+      required: [capture_file, resource_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        resource_id: {type: integer, minimum: 1}
+        x: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        y: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        width: {type: integer, minimum: 1, maximum: 65536}
+        height: {type: integer, minimum: 1, maximum: 65536}
+        checks:
+          type: array
+          items: {type: string, enum: [nan, inf, negative, precision]}
+          maxItems: 4
+        mip: {type: integer, minimum: 0, maximum: 64, default: 0}
+        slice_index: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        sample: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        event_id: {type: integer, minimum: 1}
+        max_anomalies: {type: integer, minimum: 1, maximum: 256, default: 32}
+        max_texels: {type: integer, minimum: 1, maximum: 2000000, default: 2000000}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/diagnose_pixel_values.py
+    next-tools:
+      on-success: [renderdoc_debug__pixel_history, renderdoc_analysis__sample_pixel_region]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: get_frame_overview
+    description: Report what one capture contains in a single replay - API and frame properties, action counts broken into draws, dispatches, and clears, the root-level pass structure with per-pass draw, index, and output-target load, the largest textures and the format histogram, whether this driver exposes counters and whether one of them carries GPU duration, the debug messages a replay to the last event produced, and the structural signals worth acting on, such as a degraded replay, a frame with no draws, a driver with counters but no duration counter, or one texture that dominates texture memory. Pass triangle counts are derived from API draw parameters and the signals are thresholds over structure: both are reported as estimates in estimate_fields and in the summary, and neither is a measurement. Use as the first call on an unfamiliar capture. Not for per-draw cost - use renderdoc_perf__get_action_timing.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        max_passes: {type: integer, minimum: 1, maximum: 512, default: 32}
+        max_textures: {type: integer, minimum: 1, maximum: 256, default: 8}
+        max_actions_per_pass: {type: integer, minimum: 0, maximum: 256, default: 5}
+        max_messages: {type: integer, minimum: 0, maximum: 256, default: 8}
+        include_debug_messages: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/get_frame_overview.py
+    next-tools:
+      on-success: [renderdoc_analysis__analyze_render_passes, renderdoc_perf__get_action_timing]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: get_draw_call_state
+    description: Snapshot everything one draw executed with in one call - the action itself with its depth and parent event id, the full pipeline state for that event, and the bound shader stages with their reflection, signatures, constant blocks, and resource bindings. stages defaults to the stages the pipeline state reports as bound; include_constant_buffers and include_source widen the shader payload at the cost of size. One stage this capture cannot reflect is reported as an errored entry while the other stages are still returned. Use when the question is what this draw was actually running with. Not for stepping through what the shader did to one pixel - use renderdoc_debug__debug_pixel.
+    input_schema:
+      type: object
+      required: [capture_file, event_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        event_id: {type: integer, minimum: 1}
+        stages:
+          type: array
+          items: {type: string, enum: [Vertex, Hull, Domain, Geometry, Pixel, Compute]}
+          maxItems: 6
+        include_constant_buffers: {type: boolean, default: false}
+        include_source: {type: boolean, default: false}
+        variable_limit: {type: integer, minimum: 1, maximum: 256, default: 64}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/get_draw_call_state.py
+    next-tools:
+      on-success: [renderdoc_inspect__get_shader_info, renderdoc_debug__debug_pixel]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
 

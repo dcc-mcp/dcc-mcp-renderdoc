@@ -2,18 +2,22 @@
 name: renderdoc-analysis
 description: >-
   Domain skill — Inspect an existing RenderDoc capture and export its embedded thumbnail, Chrome
-  trace, or drawcall texture resources. Use for offline graphics triage and automation artifacts.
-  Not for launching a capture — use renderdoc-capture.
+  trace, or drawcall texture resources, and analyse what the frame contains: sample a target region
+  on a grid, scan it for NaN, Inf, negative, and out-of-band values, read a whole frame's structure
+  and signals in one replay, and snapshot everything one draw executed with. Use for offline
+  graphics triage, automation artifacts, and finding where a frame starts producing garbage. Not for
+  launching a capture — use renderdoc-capture. Not for why one pixel or vertex has the value it has
+  — use renderdoc-debug.
 license: MIT
-compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.20.14+"
+compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.20.14+; qrenderdoc beside renderdoccmd for the analysis tools"
 allowed-tools: "python"
 metadata:
   dcc-mcp:
     dcc: renderdoc
     layer: domain
-    version: "0.1.0"
-    search-hint: "RenderDoc inspect rdc chunks thumbnail Chrome trace graphics analysis"
-    tags: "renderdoc,analysis,thumbnail,timeline,graphics-debugging"
+    version: "0.2.0"
+    search-hint: "RenderDoc inspect rdc chunks thumbnail Chrome trace graphics analysis sample region NaN Inf pixel diagnosis frame overview draw call state pipeline shader bindings"
+    tags: "renderdoc,analysis,thumbnail,timeline,pixel-diagnosis,frame-overview,draw-state,graphics-debugging"
     tools: tools.yaml
     depends: "dcc-diagnostics"
 ---
@@ -30,3 +34,60 @@ format, and output file for each PNG.
 Inspection reports `draw_dispatch_count`, `frame_work_count`, `present_count`, and
 `frame_content_status` so a structurally readable capture with no rendering work is not mistaken
 for a usable frame.
+
+## Two capability tiers
+
+This skill spans both RenderDoc backends, so check which one a tool needs before you call it:
+
+| Tool | Backend | Answers |
+| --- | --- | --- |
+| `inspect_capture` | `renderdoccmd` | whether the file is structurally readable at all |
+| `export_thumbnail`, `export_timeline`, `convert_capture` | `renderdoccmd` | artifacts written to a path you name |
+| `export_drawcall_resources` | `renderdoc.pyd` | the textures one event actually used |
+| `sample_pixel_region`, `diagnose_pixel_values` | `renderdoc.pyd` | what the pixels in a region contain |
+| `get_frame_overview` | `renderdoc.pyd` | what the frame contains, in one replay |
+| `get_draw_call_state` | `renderdoc.pyd` | what one draw executed with |
+
+The `renderdoccmd` baseline can convert and export, but it cannot read data back out of a capture.
+Every tool that needs readback lives in the second tier and is gated on the **deep replay backend**
+(`renderdoc.pyd`, reached through the Python runtime bundled with `qrenderdoc`).
+
+When that backend is missing, those tools return a structured `unsupported_backend` result naming
+the backend and how to enable it. None of them raise, and none of them return empty data silently.
+Call `renderdoc_inspect__replay_capabilities` first when you are unsure which tier you are on.
+
+## Working order
+
+1. `inspect_capture` — confirm the file is readable before paying for a replay.
+2. `get_frame_overview` — structure, resources, and the signals worth chasing, in one replay.
+3. `get_draw_call_state` — everything one suspicious draw was running with.
+4. `sample_pixel_region` — what the target actually contains at that event.
+5. `diagnose_pixel_values` — where in the target the values stop making sense.
+6. `renderdoc_debug__pixel_history` — why one pixel ended up that way.
+
+## What is measured and what is estimated
+
+Three of these tools report values that are derived rather than read, and each one says so in its
+payload (`estimate`, `estimate_method`, or `estimate_fields`) as well as in its summary. Read that
+before quoting a number:
+
+- **`sample_pixel_region`** reads the texels its grid lands on. A grid coarser than the region makes
+  the min, max, and mean a sample of the region, not a census of it. A grid that covers every texel
+  reports `estimate: false`. Values are decoded as floats for every format, so a 64-bit integer
+  channel comes back rounded.
+- **`diagnose_pixel_values`** strides over a region larger than `max_texels` (two million by
+  default), and the counts are then a sample of that region. The stride is reported as
+  `region.step`.
+- **`get_frame_overview`** derives pass triangle counts from the API draw parameters
+  (`numIndices / 3 * numInstances`), which is before culling, clipping, and vertex shading, and its
+  signals are thresholds over the capture's structure. Both are listed in `estimate_fields`.
+
+Two more limits are about the format, not the estimate: a block-compressed, packed, or
+special-encoded texture cannot be sampled at all, and both pixel tools report that as an
+unsupported result with the reason instead of sampled zeros. Likewise, NaN and Inf only exist in a
+floating-point format, so `diagnose_pixel_values` reports those checks as not applicable for an
+integer format, with the reason, rather than as zero anomalies.
+
+Replay runs in the Python interpreter bundled with `qrenderdoc`. On headless Linux, run the adapter
+under Xvfb or provide another working X/Wayland display; the official archive does not include Qt's
+`offscreen` platform plugin.
