@@ -218,4 +218,79 @@ tools:
     next-tools:
       on-success: [renderdoc_inspect__get_shader_info, renderdoc_debug__debug_pixel]
       on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: analyze_render_passes
+    description: Report the frame's pass structure from the action tree alone, without a counter - one entry per pass with its event range, action, draw, dispatch, and clear counts, index and instance totals, output and depth targets, and an optional list of its actions. pass_depth picks the tree level that counts as a pass, 0 being the root actions; name_filter narrows the list without a second replay. Triangle counts are derived from the API draw parameters, so they are estimates listed in estimate_fields and repeated in the summary. Use to see where the frame's work clusters and which pass owns a target. Not for how long a pass took - use renderdoc_analysis__get_pass_timing.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        pass_depth: {type: integer, minimum: 0, maximum: 32, default: 0}
+        max_depth: {type: integer, minimum: 0, maximum: 32, default: 32}
+        name_filter: {type: string, maxLength: 200}
+        max_actions_per_pass: {type: integer, minimum: 0, maximum: 256, default: 8}
+        offset: {type: integer, minimum: 0, maximum: 10000000, default: 0}
+        limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/analyze_render_passes.py
+    next-tools:
+      on-success: [renderdoc_analysis__get_pass_timing, renderdoc_analysis__analyze_state_changes]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: analyze_state_changes
+    description: Compare adjacent draws' pipeline state and report what changed between each pair, plus the runs of consecutive draws that share an identical state fingerprint and were therefore batchable. The fingerprint covers primitive topology, graphics and compute pipeline objects, per-stage shaders, output and depth targets, vertex and index buffers, viewport and scissor size, blend and depth enables, and cull mode. A section this capture's replay does not expose is reported as null and as an unavailable section rather than dropped, and the walk is bounded by max_events because each draw costs one state read. Use to find redundant state switches. Not for what a single draw was running with - use renderdoc_analysis__get_draw_call_state.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        first_event_id: {type: integer, minimum: 1}
+        last_event_id: {type: integer, minimum: 1}
+        max_events: {type: integer, minimum: 2, maximum: 256, default: 64}
+        max_changes: {type: integer, minimum: 1, maximum: 5000, default: 200}
+        min_run_length: {type: integer, minimum: 2, maximum: 100000, default: 2}
+        max_depth: {type: integer, minimum: 0, maximum: 32, default: 32}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/analyze_state_changes.py
+    next-tools:
+      on-success: [renderdoc_analysis__get_draw_call_state, renderdoc_perf__get_action_timing]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: get_pass_timing
+    description: Report GPU duration per pass by joining this driver's timing counter onto the action tree, with each pass's share of the frame, its timed and untimed action counts, and its slowest actions. pass_depth picks the tree level that counts as a pass, 0 being the root actions. A pass reports its own counter sample when the driver sampled it and the sum of its timed actions otherwise, and the method used is reported per pass so a derived number is never read as a measured one. Requires a timing counter: when this driver exposes none the result says so and lists the counters that are available instead of reporting a frame of zero-duration passes. Use after renderdoc_perf__list_counters when you want to pin counter_id. Not for the pass structure without durations - use renderdoc_analysis__analyze_render_passes.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        counter_id: {type: integer, minimum: 0}
+        pass_depth: {type: integer, minimum: 0, maximum: 32, default: 0}
+        max_depth: {type: integer, minimum: 0, maximum: 32, default: 32}
+        slowest_actions: {type: integer, minimum: 0, maximum: 100, default: 3}
+        offset: {type: integer, minimum: 0, maximum: 10000000, default: 0}
+        limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/get_pass_timing.py
+    next-tools:
+      on-success: [renderdoc_perf__get_action_timing, renderdoc_analysis__analyze_render_passes]
+      on-failure: [renderdoc_perf__list_counters, dcc_diagnostics__audit_log]
 

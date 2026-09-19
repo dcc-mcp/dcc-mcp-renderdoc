@@ -44,6 +44,8 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "diagnose_pixel_values",
         "get_frame_overview",
         "get_draw_call_state",
+        "analyze_render_passes",
+        "analyze_state_changes",
     ),
     "debug": (
         "pick_pixel",
@@ -59,6 +61,7 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "get_counters",
         "get_debug_messages",
         "get_action_timing",
+        "get_pass_timing",
         "get_overdraw",
     ),
     "ext": ("run_python_script",),
