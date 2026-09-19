@@ -1878,6 +1878,456 @@ def _binding_count(bindings):
     return total
 
 
+def _action_nodes(controller, rd, max_depth):
+    """Flatten the action tree into one entry per node, parents included."""
+    nodes = []
+    structured = None
+    try:
+        structured = controller.GetStructuredFile()
+    except BaseException:
+        structured = None
+
+    def walk(actions, depth, parent):
+        for action in actions:
+            event_id = _int(getattr(action, "eventId", 0))
+            name = ""
+            try:
+                name = str(action.GetName(structured)) if structured is not None else ""
+            except BaseException:
+                name = ""
+            nodes.append(
+                {
+                    "event_id": event_id,
+                    "action_id": _int(getattr(action, "actionId", 0)),
+                    "depth": depth,
+                    "parent_event_id": parent,
+                    "name": name or _text(getattr(action, "customName", "")),
+                    "kind": _action_kind(rd, action),
+                    "num_indices": _int(getattr(action, "numIndices", 0)),
+                    "num_instances": max(1, _int(getattr(action, "numInstances", 0))),
+                }
+            )
+            if depth + 1 <= max_depth:
+                walk(getattr(action, "children", []) or [], depth + 1, event_id)
+
+    walk(controller.GetRootActions(), 0, None)
+    return nodes
+
+
+def _op_analyze_render_passes(controller, rd, params, context):
+    """Report the frame's pass structure and what each pass carries.
+
+    RenderDoc's action tree is the only pass boundary a capture reliably has:
+    markers and regions are ordinary actions, so a pass is a node at
+    ``pass_depth`` together with everything beneath it. Draws, dispatches,
+    index counts, and output targets are counted from the tree alone, which is
+    why this op answers on every capture that replays at all -- no counter, and
+    therefore no driver support, is involved.
+    """
+    del context
+    pass_depth = _clamp(params.get("pass_depth"), 0, 32, 0)
+    max_depth = _clamp(params.get("max_depth"), 0, 32, 32)
+    offset = _clamp(params.get("offset"), 0, 10000000, 0)
+    limit = _clamp(params.get("limit"), 1, 5000, 200)
+    max_actions = _clamp(params.get("max_actions_per_pass"), 0, MAX_ITEMS, 8)
+    name_filter = _text(params.get("name_filter", "") or "").strip().casefold()
+    roots = controller.GetRootActions()
+    nodes = []
+
+    def collect(actions, depth):
+        for action in actions:
+            nodes.append((action, depth))
+            if depth + 1 <= max_depth:
+                collect(getattr(action, "children", []) or [], depth + 1)
+
+    collect(roots, 0)
+    # Totals come from the root subtrees, so a nested pass is counted once no
+    # matter which level the caller asks for.
+    totals = _new_pass_stats()
+    for action in roots:
+        stats = _new_pass_stats()
+        _accumulate_pass(controller, rd, action, stats, 0)
+        for key in (
+            "action_count",
+            "draw_count",
+            "dispatch_count",
+            "clear_count",
+            "other_count",
+            "total_indices",
+            "total_instances",
+            "triangle_estimate",
+        ):
+            totals[key] += stats[key]
+        totals["outputs"].update(stats["outputs"])
+        totals["depth_outputs"].update(stats["depth_outputs"])
+    passes = []
+    for action, depth in nodes:
+        if depth != pass_depth:
+            continue
+        name = _text(getattr(action, "customName", ""))
+        if name_filter and name_filter not in name.casefold():
+            continue
+        stats = _new_pass_stats()
+        _accumulate_pass(controller, rd, action, stats, max_actions)
+        entry = {
+            "event_id": _int(getattr(action, "eventId", 0)),
+            "name": name,
+            "child_count": len(getattr(action, "children", []) or []),
+        }
+        entry.update(_finish_pass_stats(stats))
+        passes.append(entry)
+    passes.sort(key=lambda entry: entry["event_id"])
+    ranked = sorted(passes, key=lambda entry: entry["draw_count"], reverse=True)
+    heaviest = sorted(passes, key=lambda entry: entry["triangle_estimate"], reverse=True)
+    totals_finished = _finish_pass_stats(totals)
+    del totals_finished["actions"]
+    del totals_finished["first_event_id"]
+    del totals_finished["last_event_id"]
+    return {
+        "pass_depth": pass_depth,
+        "max_depth": max_depth,
+        "offset": offset,
+        "limit": limit,
+        "name_filter": name_filter or None,
+        "pass_count": len(passes),
+        "truncated": len(passes) > offset + limit,
+        "passes": passes[offset : offset + limit],
+        "top_passes_by_draws": [
+            {
+                "event_id": entry["event_id"],
+                "name": entry["name"],
+                "draw_count": entry["draw_count"],
+            }
+            for entry in ranked[:limit]
+        ],
+        "top_passes_by_triangles": [
+            {
+                "event_id": entry["event_id"],
+                "name": entry["name"],
+                "triangle_estimate": entry["triangle_estimate"],
+            }
+            for entry in heaviest[:limit]
+        ],
+        "totals": totals_finished,
+        "estimate_fields": {
+            "passes[].triangle_estimate": "numIndices / 3 * numInstances, counted before "
+            "GPU culling, clipping, and vertex shading"
+        },
+    }
+
+
+def _state_fingerprint(controller, rd):
+    """Reduce one event's pipeline state to the parts that cost a state switch.
+
+    Every section is read defensively: a section this capture's replay does not
+    expose becomes ``None``, which is a value that compares unequal to any real
+    state and is reported that way, rather than an exception that loses the
+    whole diff.
+    """
+    state = controller.GetPipelineState()
+    facts = {}
+
+    def take(key, getter):
+        try:
+            facts[key] = getter()
+        except BaseException:
+            facts[key] = None
+
+    take("primitive_topology", lambda: _enum(state.GetPrimitiveTopology()))
+    take("graphics_pipeline", lambda: _int(state.GetGraphicsPipelineObject()))
+    take("compute_pipeline", lambda: _int(state.GetComputePipelineObject()))
+    shaders = {}
+    for name in _SHADER_STAGES:
+        stage = _stage(rd, name)
+        if stage is None:
+            continue
+
+        def read(stage=stage):
+            try:
+                return _int(state.GetShader(stage))
+            except BaseException:
+                return None
+
+        shaders[name] = read()
+    facts["shaders"] = shaders
+    take(
+        "outputs",
+        lambda: [_int(target.resource) for target in state.GetOutputTargets()],
+    )
+    take("depth_target", lambda: _int(state.GetDepthTarget().resource))
+    take("vertex_buffers", lambda: [_int(item.resource) for item in state.GetVBuffers()])
+    take("index_buffer", lambda: _int(state.GetIBuffer().resource))
+    take("viewport", lambda: _size_of(state.GetViewport(0)))
+    take("scissor", lambda: _size_of(state.GetScissor(0)))
+    take("blend_enabled", lambda: [bool(item.enabled) for item in state.GetColorBlends()])
+    take("depth_enable", lambda: bool(state.GetDepthTestState().depthEnable))
+    take("cull_mode", lambda: _enum(state.GetRasterState().cullMode))
+    return facts
+
+
+def _size_of(rect):
+    """A viewport or scissor rectangle as the two numbers that affect state."""
+    return [_describe(getattr(rect, "width", 0)), _describe(getattr(rect, "height", 0))]
+
+
+def _fingerprint_key(facts):
+    """One comparable identity for a fingerprint, for grouping identical runs."""
+    return json.dumps(facts, sort_keys=True, default=_text)
+
+
+def _op_analyze_state_changes(controller, rd, params, context):
+    """Diff adjacent draws' pipeline state and find where the state repeats.
+
+    Two draws that run with an identical fingerprint are a batching opportunity:
+    the switch between them was avoidable. Reporting the runs rather than only
+    the diffs is what makes that visible, and bounding the walk with
+    ``max_events`` is what keeps one call to a state read per draw instead of
+    one per draw in the frame.
+    """
+    del context
+    max_events = _clamp(params.get("max_events"), 2, 256, 64)
+    max_changes = _clamp(params.get("max_changes"), 1, 5000, 200)
+    min_run_length = _clamp(params.get("min_run_length"), 2, 100000, 2)
+    first_event = params.get("first_event_id")
+    last_event = params.get("last_event_id")
+    first_event = None if first_event is None else _int(first_event)
+    last_event = None if last_event is None else _int(last_event)
+    nodes = _action_nodes(controller, rd, _clamp(params.get("max_depth"), 0, 32, 32))
+    draws = [node for node in nodes if node["kind"] == "draw"]
+    if first_event is not None:
+        draws = [node for node in draws if node["event_id"] >= first_event]
+    if last_event is not None:
+        draws = [node for node in draws if node["event_id"] <= last_event]
+    selected = draws[:max_events]
+    unavailable = []
+    fingerprints = []
+    for node in selected:
+        try:
+            _set_event(controller, node["event_id"])
+            fingerprints.append(_state_fingerprint(controller, rd))
+        except BaseException as exc:
+            unavailable.append(
+                "state.event_{}: {}: {}".format(node["event_id"], type(exc).__name__, exc)
+            )
+            fingerprints.append(None)
+    changes = []
+    by_key = {}
+    for index in range(1, len(selected)):
+        before = fingerprints[index - 1]
+        after = fingerprints[index]
+        if before is None or after is None:
+            continue
+        for key in sorted(set(before) | set(after)):
+            if before.get(key) == after.get(key):
+                continue
+            by_key[key] = by_key.get(key, 0) + 1
+            if len(changes) < max_changes:
+                changes.append(
+                    {
+                        "from_event_id": selected[index - 1]["event_id"],
+                        "to_event_id": selected[index]["event_id"],
+                        "key": key,
+                        "before": before.get(key),
+                        "after": after.get(key),
+                    }
+                )
+    runs = []
+    run = []
+    previous = None
+    for node, fingerprint in zip(selected, fingerprints):
+        key = None if fingerprint is None else _fingerprint_key(fingerprint)
+        if fingerprint is not None and key == previous:
+            run.append(node["event_id"])
+            continue
+        if len(run) >= min_run_length:
+            runs.append(run)
+        run = [] if fingerprint is None else [node["event_id"]]
+        previous = key
+    if len(run) >= min_run_length:
+        runs.append(run)
+    ranked_keys = sorted(by_key.items(), key=lambda item: item[1], reverse=True)
+    return {
+        "first_event_id": first_event,
+        "last_event_id": last_event,
+        "max_events": max_events,
+        "draw_count": len(draws),
+        "analyzed_events": [node["event_id"] for node in selected],
+        "analyzed_event_count": len(selected),
+        "event_count_truncated": len(draws) > max_events,
+        "change_count": sum(by_key.values()),
+        "changes_returned": len(changes),
+        "changes_truncated": sum(by_key.values()) > len(changes),
+        "changes": changes,
+        "changes_by_key": [{"key": key, "count": count} for key, count in ranked_keys],
+        "min_run_length": min_run_length,
+        "runs": [
+            {
+                "from_event_id": events[0],
+                "to_event_id": events[-1],
+                "draw_count": len(events),
+                "event_ids": events,
+            }
+            for events in runs
+        ],
+        "batchable_draw_count": sum(len(events) for events in runs),
+        "unavailable_sections": unavailable,
+    }
+
+
+def _ancestor_map(rows):
+    """Every event's ancestor event ids, built in one pass over the tree."""
+    by_event = dict((row["event_id"], row) for row in rows)
+    ancestors = {}
+    for row in rows:
+        chain = set()
+        current = row.get("parent_event_id")
+        while current is not None and current not in chain:
+            chain.add(current)
+            parent = by_event.get(current)
+            current = None if parent is None else parent.get("parent_event_id")
+        ancestors[row["event_id"]] = chain
+    return ancestors
+
+
+def _pass_duration(row, rows, durations, ancestors):
+    """Report one pass's duration and how it was arrived at.
+
+    A pass marker event usually carries its own counter sample -- the elapsed
+    time of the pass -- and that is the number to report. When the driver did
+    not sample the pass event itself, the fallback sums the pass's timed
+    actions. The pass event's own sample is never added to that sum, so a
+    nested capture does not count the same time twice.
+    """
+    own = durations.get(row["event_id"])
+    children = [
+        other
+        for other in rows
+        if other["event_id"] != row["event_id"]
+        and other["duration"] is not None
+        and row["event_id"] in ancestors.get(other["event_id"], ())
+    ]
+    if own is not None:
+        return own, "pass_event_counter", len(children) + 1
+    return sum(other["duration"] for other in children), "sum_of_timed_actions", len(children)
+
+
+def _op_get_pass_timing(controller, rd, params, context):
+    """Report GPU duration per pass, joined from the timing counter.
+
+    RenderDoc stores no duration on an action, so the number comes from the
+    timing counter this driver exposes, sampled per event and joined back onto
+    the action tree exactly the way ``get_action_timing`` does. When this driver
+    exposes no duration counter the result says so and lists the counters that
+    are available, rather than reporting a frame that looks free.
+    """
+    del context
+    pass_depth = _clamp(params.get("pass_depth"), 0, 32, 0)
+    max_depth = _clamp(params.get("max_depth"), 0, 32, 32)
+    offset = _clamp(params.get("offset"), 0, 10000000, 0)
+    limit = _clamp(params.get("limit"), 1, 5000, 200)
+    slowest_limit = _clamp(params.get("slowest_actions"), 0, 100, 3)
+    entries = _counter_descriptions(controller, controller.EnumerateCounters())
+    found = _find_timing_counter(entries, params.get("counter_id"))
+    if found is None:
+        return {
+            "supported": False,
+            "timing_counter": None,
+            "error_message": (
+                "this capture's replay exposes no GPU timing counter"
+                if params.get("counter_id") is None
+                else "counter {} is not exposed by this capture's replay".format(
+                    _int(params.get("counter_id"))
+                )
+            ),
+            "counter_count": len(entries),
+            "available_counters": [info for _native, info in entries[:MAX_ITEMS]],
+            "hint": "call renderdoc_perf__list_counters to see what this driver exposes, "
+            "or renderdoc_analysis__analyze_render_passes for the structure without "
+            "durations",
+            "passes": [],
+            "totals": None,
+        }
+    native, info = found
+    durations = {}
+    for value in controller.FetchCounters([native]):
+        sampled = _counter_value(value, info.get("result_type", ""))
+        if isinstance(sampled, (int, float)) and not isinstance(sampled, bool):
+            durations[_int(value.eventId)] = sampled
+    nodes = _action_nodes(controller, rd, max_depth)
+    rows = []
+    for node in nodes:
+        row = dict(node)
+        row["duration"] = durations.get(node["event_id"])
+        rows.append(row)
+    ancestors = _ancestor_map(rows)
+    passes = []
+    for row in rows:
+        if row["depth"] != pass_depth:
+            continue
+        duration, method, timed = _pass_duration(row, rows, durations, ancestors)
+        descendants = [
+            other
+            for other in rows
+            if other["event_id"] != row["event_id"]
+            and row["event_id"] in ancestors.get(other["event_id"], ())
+        ]
+        slowest = sorted(
+            (other for other in descendants if other["duration"] is not None),
+            key=lambda other: other["duration"],
+            reverse=True,
+        )[:slowest_limit]
+        passes.append(
+            {
+                "event_id": row["event_id"],
+                "name": row["name"],
+                "duration": duration,
+                "duration_method": method,
+                "derived": method != "pass_event_counter",
+                "action_count": len(descendants) + 1,
+                "timed_action_count": timed,
+                "untimed_action_count": len(descendants) + 1 - timed,
+                "slowest_actions": [
+                    {
+                        "event_id": other["event_id"],
+                        "name": other["name"],
+                        "duration": other["duration"],
+                    }
+                    for other in slowest
+                ],
+            }
+        )
+    passes.sort(key=lambda entry: entry["duration"], reverse=True)
+    total = sum(entry["duration"] for entry in passes)
+    for entry in passes:
+        entry["share_percent"] = float(entry["duration"] / total * 100.0) if total else None
+    values = [entry["duration"] for entry in passes]
+    return {
+        "supported": True,
+        "timing_counter": info,
+        "unit": info.get("unit"),
+        "pass_depth": pass_depth,
+        "max_depth": max_depth,
+        "offset": offset,
+        "limit": limit,
+        "pass_count": len(passes),
+        "truncated": len(passes) > offset + limit,
+        "passes": passes[offset : offset + limit],
+        "totals": {
+            "unit": info.get("unit"),
+            "pass_total": float(total),
+            "timed_event_count": len(durations),
+            "min": float(min(values)) if values else None,
+            "max": float(max(values)) if values else None,
+            "mean": float(sum(values) / len(values)) if values else None,
+        },
+        "estimate_fields": {
+            "passes[].duration": "the pass event's own counter sample when the driver "
+            "sampled it, otherwise the sum of the pass's timed actions; the method "
+            "used is reported per pass",
+        },
+    }
+
+
 def _decode_vertices(raw, stride, comp_count, limit=MAX_VERTICES):
     if stride <= 0 or comp_count <= 0:
         return []
@@ -3194,6 +3644,9 @@ OPERATIONS = {
     "diagnose_pixel_values": _op_diagnose_pixel_values,
     "get_frame_overview": _op_get_frame_overview,
     "get_draw_call_state": _op_get_draw_call_state,
+    "analyze_render_passes": _op_analyze_render_passes,
+    "analyze_state_changes": _op_analyze_state_changes,
+    "get_pass_timing": _op_get_pass_timing,
     "get_mesh_data": _op_get_mesh_data,
     "export_mesh": _op_export_mesh,
     "pick_pixel": _op_pick_pixel,

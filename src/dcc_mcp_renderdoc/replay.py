@@ -55,6 +55,8 @@ REPLAY_OPERATIONS = (
     "diagnose_pixel_values",
     "get_frame_overview",
     "get_draw_call_state",
+    "analyze_render_passes",
+    "analyze_state_changes",
     "get_mesh_data",
     "export_mesh",
     "pick_pixel",
@@ -66,6 +68,7 @@ REPLAY_OPERATIONS = (
     "get_debug_messages",
     "describe_perf",
     "get_action_timing",
+    "get_pass_timing",
     "get_overdraw",
     "run_python_script",
 )

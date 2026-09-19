@@ -25,7 +25,11 @@ ANALYSIS_OPERATIONS = (
     "diagnose_pixel_values",
     "get_frame_overview",
     "get_draw_call_state",
+    "analyze_render_passes",
+    "analyze_state_changes",
 )
+#: Operations gated on the perf capability group rather than inspect.
+PERF_ANALYSIS_OPERATIONS = ("get_pass_timing",)
 
 
 def _format(name="R32G32B32A32_FLOAT", comp_type="CompType.Float", count=4, width=4, special=0):
@@ -69,6 +73,8 @@ def _run(monkeypatch, tmp_path, operation, params, controller):
 def test_analysis_operations_are_declared_and_implemented():
     assert set(ANALYSIS_OPERATIONS) <= set(replay.REPLAY_OPERATIONS)
     assert set(ANALYSIS_OPERATIONS) <= set(capabilities.CAPABILITY_GROUPS["inspect"])
+    assert set(PERF_ANALYSIS_OPERATIONS) <= set(replay.REPLAY_OPERATIONS)
+    assert set(PERF_ANALYSIS_OPERATIONS) <= set(capabilities.CAPABILITY_GROUPS["perf"])
     bridge = runpy.run_path(str(BRIDGE), run_name="dcc_mcp_renderdoc_bridge")
     assert set(replay.REPLAY_OPERATIONS) <= set(bridge["OPERATIONS"])
 
@@ -363,6 +369,210 @@ def test_get_draw_call_state_rejects_an_unknown_event(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# analyze_render_passes
+# --------------------------------------------------------------------------- #
+
+
+def test_analyze_render_passes_reports_roots_and_their_load(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, "analyze_render_passes", {}, AnalysisController())
+    assert result["pass_depth"] == 0
+    assert result["pass_count"] == 2
+    assert result["passes"][0]["event_id"] == 1
+    assert result["passes"][0]["name"] == "Frame"
+    assert result["passes"][0]["draw_count"] == 1
+    assert result["passes"][0]["clear_count"] == 1
+    # The clear contributes no geometry, so the pass carries one triangle.
+    assert result["passes"][0]["triangle_estimate"] == 1
+    assert result["passes"][0]["outputs"] == [7]
+    assert result["passes"][1]["event_id"] == 4
+    assert result["totals"]["draw_count"] == 2
+    assert result["totals"]["clear_count"] == 1
+    assert result["estimate_fields"]["passes[].triangle_estimate"]
+
+
+def test_analyze_render_passes_can_select_a_deeper_level(monkeypatch, tmp_path):
+    result = _run(
+        monkeypatch, tmp_path, "analyze_render_passes", {"pass_depth": 1}, AnalysisController()
+    )
+    assert result["pass_depth"] == 1
+    assert [entry["event_id"] for entry in result["passes"]] == [2, 3]
+    assert [entry["name"] for entry in result["passes"]] == ["Draw A", "Clear B"]
+    # Totals stay over the whole frame, not over the selected level twice.
+    assert result["totals"]["action_count"] == 4
+
+
+def test_analyze_render_passes_filters_by_name(monkeypatch, tmp_path):
+    result = _run(
+        monkeypatch,
+        tmp_path,
+        "analyze_render_passes",
+        {"name_filter": "draw"},
+        AnalysisController(),
+    )
+    # At pass_depth 0 only the root actions are passes, so the filter matches
+    # the root named "Draw C" and not the nested "Draw A".
+    assert [entry["event_id"] for entry in result["passes"]] == [4]
+    assert result["name_filter"] == "draw"
+
+
+# --------------------------------------------------------------------------- #
+# analyze_state_changes
+# --------------------------------------------------------------------------- #
+
+
+class SwitchingController(AnalysisController):
+    """A controller whose pipeline state changes on the second draw."""
+
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        self.events = []
+
+    def GetPipelineState(self):
+        return SwitchingPipeState(self)
+
+
+def _blend(enabled):
+    return SimpleNamespace(enabled=enabled)
+
+
+class SwitchingPipeState:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def GetShader(self, stage):
+        return 31
+
+    def GetPrimitiveTopology(self):
+        return "Topology.TriangleList"
+
+    def GetGraphicsPipelineObject(self):
+        return 41
+
+    def GetComputePipelineObject(self):
+        return 0
+
+    def GetOutputTargets(self):
+        return [SimpleNamespace(resource=11)]
+
+    def GetDepthTarget(self):
+        return SimpleNamespace(resource=12)
+
+    def GetVBuffers(self):
+        return [SimpleNamespace(resource=21)]
+
+    def GetIBuffer(self):
+        return SimpleNamespace(resource=0)
+
+    def GetViewport(self, index):
+        return SimpleNamespace(width=4, height=4)
+
+    def GetScissor(self, index):
+        return SimpleNamespace(width=4, height=4)
+
+    def GetColorBlends(self):
+        # The third draw repeats the first, so the state switch is a round trip.
+        steps = [False, True, False]
+        return [_blend(steps[min(len(self.controller.calls) - 1, len(steps) - 1)])]
+
+    def GetDepthTestState(self):
+        return SimpleNamespace(depthEnable=True)
+
+    def GetRasterState(self):
+        return SimpleNamespace(cullMode="CullMode.NoCull")
+
+
+def test_analyze_state_changes_diffs_adjacent_draws(monkeypatch, tmp_path):
+    controller = SwitchingController()
+    result = _run(monkeypatch, tmp_path, "analyze_state_changes", {}, controller)
+    assert result["draw_count"] == 2
+    assert result["analyzed_event_count"] == 2
+    assert result["analyzed_events"] == [2, 4]
+    assert result["change_count"] == 1
+    assert result["changes"][0]["key"] == "blend_enabled"
+    assert result["changes"][0]["before"] == [False]
+    assert result["changes"][0]["after"] == [True]
+    assert result["changes_by_key"] == [{"key": "blend_enabled", "count": 1}]
+    assert result["runs"] == []
+
+
+def test_analyze_state_changes_reports_state_that_cannot_be_read(monkeypatch, tmp_path):
+    controller = AnalysisController()
+
+    def broken():
+        raise RuntimeError("state section unavailable")
+
+    monkeypatch.setattr(controller, "GetPipelineState", broken)
+    result = _run(monkeypatch, tmp_path, "analyze_state_changes", {}, controller)
+    assert result["analyzed_event_count"] == 2
+    assert result["change_count"] == 0
+    assert result["unavailable_sections"]
+    assert "state.event_2" in result["unavailable_sections"][0]
+
+
+# --------------------------------------------------------------------------- #
+# get_pass_timing
+# --------------------------------------------------------------------------- #
+
+
+def test_get_pass_timing_joins_the_timing_counter_onto_passes(monkeypatch, tmp_path):
+    controller = AnalysisController()
+    samples = {1: 4.0, 2: 3.0, 3: 1.0, 4: 2.0}
+    monkeypatch.setattr(
+        controller,
+        "FetchCounters",
+        lambda counters: [
+            SimpleNamespace(counter=1, eventId=event, value=SimpleNamespace(f=value))
+            for event, value in samples.items()
+        ],
+    )
+    result = _run(monkeypatch, tmp_path, "get_pass_timing", {}, controller)
+    assert result["supported"] is True
+    assert result["timing_counter"]["name"] == "duration"
+    assert result["pass_count"] == 2
+    by_event = {entry["event_id"]: entry for entry in result["passes"]}
+    # Both root events carry their own sample, so neither is a derived sum.
+    assert by_event[1]["duration"] == 4.0
+    assert by_event[1]["duration_method"] == "pass_event_counter"
+    assert by_event[1]["derived"] is False
+    assert by_event[4]["duration"] == 2.0
+    assert by_event[1]["share_percent"] == pytest.approx(66.666, rel=1e-3)
+    assert by_event[1]["untimed_action_count"] == 0
+    assert result["totals"]["pass_total"] == 6.0
+    assert result["estimate_fields"]["passes[].duration"]
+
+
+def test_get_pass_timing_falls_back_to_summing_timed_actions(monkeypatch, tmp_path):
+    controller = AnalysisController()
+    # The frame root is not sampled, only the draws inside it are.
+    samples = {2: 3.0, 4: 2.0}
+    monkeypatch.setattr(
+        controller,
+        "FetchCounters",
+        lambda counters: [
+            SimpleNamespace(counter=1, eventId=event, value=SimpleNamespace(f=value))
+            for event, value in samples.items()
+        ],
+    )
+    result = _run(monkeypatch, tmp_path, "get_pass_timing", {}, controller)
+    by_event = {entry["event_id"]: entry for entry in result["passes"]}
+    assert by_event[1]["duration"] == 3.0
+    assert by_event[1]["duration_method"] == "sum_of_timed_actions"
+    assert by_event[1]["derived"] is True
+    assert by_event[1]["untimed_action_count"] == 2
+    assert by_event[4]["duration"] == 2.0
+
+
+def test_get_pass_timing_reports_a_driver_without_a_timing_counter(monkeypatch, tmp_path):
+    controller = AnalysisController()
+    monkeypatch.setattr(controller, "EnumerateCounters", lambda: [])
+    result = _run(monkeypatch, tmp_path, "get_pass_timing", {}, controller)
+    assert result["supported"] is False
+    assert "no GPU timing counter" in result["error_message"]
+    assert result["available_counters"] == []
+    assert result["passes"] == []
+
+
+# --------------------------------------------------------------------------- #
 # Skill surface
 # --------------------------------------------------------------------------- #
 
@@ -383,7 +593,7 @@ def test_analysis_skill_declares_one_tool_per_script():
     assert sorted(re.findall(r"^  - name: ([a-z_]+)$", tools, re.MULTILINE)) == scripts
     for name in scripts:
         assert "source_file: scripts/{}.py".format(name) in tools
-    assert set(ANALYSIS_OPERATIONS) <= set(scripts)
+    assert set(ANALYSIS_OPERATIONS) | set(PERF_ANALYSIS_OPERATIONS) <= set(scripts)
 
 
 def test_analysis_scripts_report_an_unreachable_backend(monkeypatch, tmp_path):
@@ -399,6 +609,9 @@ def test_analysis_scripts_report_an_unreachable_backend(monkeypatch, tmp_path):
         "diagnose_pixel_values": {"resource_id": 11},
         "get_frame_overview": {},
         "get_draw_call_state": {"event_id": 2},
+        "analyze_render_passes": {},
+        "analyze_state_changes": {},
+        "get_pass_timing": {},
     }
     for name, params in calls.items():
         result = _load_analysis_script(name).main(capture_file=str(capture), **params)
