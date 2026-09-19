@@ -40,6 +40,10 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "get_shader_info",
         "get_texture_data",
         "get_buffer_data",
+        "sample_pixel_region",
+        "diagnose_pixel_values",
+        "get_frame_overview",
+        "get_draw_call_state",
     ),
     "debug": (
         "pick_pixel",

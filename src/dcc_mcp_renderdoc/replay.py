@@ -51,6 +51,10 @@ REPLAY_OPERATIONS = (
     "get_shader_info",
     "get_texture_data",
     "get_buffer_data",
+    "sample_pixel_region",
+    "diagnose_pixel_values",
+    "get_frame_overview",
+    "get_draw_call_state",
     "get_mesh_data",
     "export_mesh",
     "pick_pixel",
@@ -219,6 +223,31 @@ def run_perf_operation(
     exception.
     """
     unsupported = unsupported_backend("perf", command=command)
+    if unsupported is not None:
+        return unsupported
+    return run_replay_operation(
+        capture_file, operation, params, timeout_secs=timeout_secs, command=command
+    )
+
+
+def run_analysis_operation(
+    capture_file: str,
+    operation: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    timeout_secs: int = 300,
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run one analysis replay operation, or report the backend as unreachable.
+
+    The analysis tools must never crash when ``renderdoc.pyd`` is absent, so an
+    unreachable backend comes back as a structured report the caller turns into
+    an explicit "unsupported, here is how to enable it" result instead of an
+    exception. The capability group is the one that owns the operation, which is
+    what lets a counter-backed tool sit beside a texture-backed one in the same
+    skill without either of them hard-coding its gate.
+    """
+    unsupported = unsupported_backend(group_for(operation), command=command)
     if unsupported is not None:
         return unsupported
     return run_replay_operation(
