@@ -916,13 +916,14 @@ def _debug_detail(params):
 
 
 def _drive_debug(controller, trace):
-    """Step RenderDoc's debugger until the trace is complete.
+    """Step RenderDoc's debugger until the trace is complete and return its states.
 
-    RenderDoc hands back a ``ShaderDebugTrace`` with nothing recorded in it: the
-    states only accumulate while ``ContinueDebug`` is driven, which is why the
-    official example loops over that call before reading the trace. A trace read
-    any earlier looks empty no matter what the shader did, so an empty result
-    after this loop is a failure to step, not an empty shader.
+    ``ContinueDebug`` hands back one batch of ``ShaderDebugState`` per call and an
+    empty batch once the shader has finished simulating, so those batches are the
+    only place the steps ever exist -- ``ShaderDebugTrace`` carries no ``states``
+    member at all. Collection therefore stops on the first empty batch, or once
+    ``MAX_DEBUG_STEPS`` states have been gathered. An empty collection afterwards
+    is a failure to step, not an empty shader.
     """
     debugger = getattr(trace, "debugger", None)
     if debugger is None:
@@ -930,12 +931,13 @@ def _drive_debug(controller, trace):
             "RenderDoc returned a shader debug trace without a debugger, so this "
             "invocation cannot be stepped"
         )
-    stepped = 0
-    while bool(controller.ContinueDebug(debugger)):
-        stepped += 1
-        if stepped >= MAX_DEBUG_STEPS:
+    states = []
+    while len(states) < MAX_DEBUG_STEPS:
+        batch = list(controller.ContinueDebug(debugger) or ())
+        if not batch:
             break
-    return list(getattr(trace, "states", ()) or ())
+        states.extend(batch)
+    return states[:MAX_DEBUG_STEPS]
 
 
 def _trace_info(controller, trace, max_steps, detail, facts):

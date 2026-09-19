@@ -63,10 +63,11 @@ def test_install_contract_uses_official_core_loader_and_resource():
         .joinpath("schemas", "adapter-install-sop-v1.schema.json")
         .read_bytes()
     )
-    assert len(schema_bytes) == 4261
-    assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "3ca25788439917b4d4c0617230a762f9797756b5b54f45c8c4149f975b90f904"
-    )
+    # The schema is owned by dcc-mcp-core and grows between releases, so assert
+    # the resource and the loader agree instead of pinning its size or digest.
+    schema = json.loads(schema_bytes)
+    assert schema == install_contract.load_install_sop_schema()
+    assert schema["$id"] == "https://dcc-mcp.github.io/schemas/adapter-install-sop-v1.schema.json"
     Draft202012Validator.check_schema(install_contract.load_install_sop_schema())
 
 

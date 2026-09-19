@@ -142,13 +142,13 @@ class _PixelValue:
 def _debug_trace(controller):
     """Stand-in for one RenderDoc ``ShaderDebugTrace``.
 
-    RenderDoc records nothing until ``ContinueDebug`` is driven, so the states
-    start empty and the fake controller appends one per step.
+    ``ShaderDebugTrace`` carries no ``states`` member: the steps only ever exist
+    in the batches ``ContinueDebug`` returns, so the fake controller hands them
+    out there instead of accumulating them on the trace.
     """
     return SimpleNamespace(
         stage=_Enum("ShaderStage.Pixel", 5),
         debugger=_Enum("ShaderDebugger", 1),
-        states=controller.debug_states,
         inputs=None,
         sourceVars=None,
     )
@@ -269,20 +269,19 @@ class FakeController:
         return list(self.pixel_modifications)
 
     def ContinueDebug(self, debugger):
-        """RenderDoc only records debug states while this is driven."""
+        """RenderDoc returns one batch of debug states per step, [] once done."""
         self.calls.append(("continue-debug", int(debugger)))
         if self.debug_steps <= 0:
-            return False
+            return []
         self.debug_steps -= 1
-        self.debug_states.append(
-            SimpleNamespace(
-                stepIndex=len(self.debug_states),
-                nextInstruction=1,
-                flags=_Enum("ShaderEvents.NoEvent", 0),
-                changes=None,
-            )
+        state = SimpleNamespace(
+            stepIndex=len(self.debug_states),
+            nextInstruction=1,
+            flags=_Enum("ShaderEvents.NoEvent", 0),
+            changes=None,
         )
-        return True
+        self.debug_states.append(state)
+        return [state]
 
     def DebugPixel(self, x, y, inputs):
         self.calls.append(("debug-pixel", x, y))
@@ -1448,13 +1447,24 @@ def test_bridge_debug_pixel_drives_the_continue_debug_loop(monkeypatch, tmp_path
     assert ("free-trace",) in context.controller.calls
 
 
+def test_bridge_debug_caps_the_states_it_collects(monkeypatch, tmp_path):
+    """State collection stops at ``MAX_DEBUG_STEPS`` instead of looping forever."""
+    from dcc_mcp_renderdoc import _replay_bridge
+
+    overrun = _replay_bridge.MAX_DEBUG_STEPS + 5
+    controller = FakeController(debug_steps=overrun)
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    result = status["result"]
+    assert result["step_count"] == _replay_bridge.MAX_DEBUG_STEPS
+    assert context.controller.debug_steps == 5
+
+
 def test_bridge_debug_reports_a_trace_without_a_debugger(monkeypatch, tmp_path):
     """A trace that cannot be stepped is a failure, not a successful empty trace."""
     controller = FakeController()
     controller.DebugPixel = lambda x, y, inputs: SimpleNamespace(
         stage=_Enum("ShaderStage.Pixel", 5),
         debugger=None,
-        states=[],
         inputs=None,
         sourceVars=None,
     )
