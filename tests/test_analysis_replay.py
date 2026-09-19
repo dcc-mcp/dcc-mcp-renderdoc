@@ -9,13 +9,13 @@ format description detailed enough to decode, and crafted texel bytes.
 from __future__ import annotations
 
 import importlib.util
-import re
 import runpy
 import struct
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_package import load_skill_manifest
 from test_replay import BRIDGE, FakeController, _command_root, _texture, run_bridge
 
 from dcc_mcp_renderdoc import capabilities, replay
@@ -426,8 +426,9 @@ def test_pass_names_come_from_the_structured_file_before_custom_name(monkeypatch
 
     def named(root):
         for action in root:
+            label = action.GetName(None)
             action.customName = ""
-            action.GetName = lambda _structured, label=action.GetName(None): label
+            action.GetName = lambda _structured, label=label: label
             named(getattr(action, "children", []) or [])
         return root
 
@@ -620,12 +621,12 @@ def _load_analysis_script(name):
 
 def test_analysis_skill_declares_one_tool_per_script():
     root = Path(replay.__file__).parent / "skills" / "renderdoc-analysis"
-    tools = (root / "tools.yaml").read_text(encoding="utf-8")
+    manifest = load_skill_manifest(root)
     scripts = sorted(path.stem for path in (root / "scripts").glob("*.py"))
     assert scripts
-    assert sorted(re.findall(r"^  - name: ([a-z_]+)$", tools, re.MULTILINE)) == scripts
-    for name in scripts:
-        assert "source_file: scripts/{}.py".format(name) in tools
+    assert sorted(entry["name"] for entry in manifest["tools"]) == scripts
+    for entry in manifest["tools"]:
+        assert entry["source_file"] == "scripts/{}.py".format(entry["name"])
     assert set(ANALYSIS_OPERATIONS) | set(PERF_ANALYSIS_OPERATIONS) <= set(scripts)
 
 
