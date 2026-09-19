@@ -103,7 +103,17 @@ tools:
       on-success: [renderdoc_analysis__inspect_capture]
       on-failure: [renderdoc_capture__get_version, dcc_diagnostics__audit_log]
   - name: sample_pixel_region
-    description: Sample a rectangular region of one texture or render target on a grid and report per sample its coordinates and decoded channel values, plus per-channel min, max, and mean over the samples. event_id replays to that event first, so the readback is the target's contents at that point in the frame. Requires an uncompressed numeric format: block-compressed, packed, and special formats come back as a structured unsupported result naming the reason instead of sampled zeros. The grid decides how much of the region is read, so a grid coarser than the region makes the statistics a sampled estimate, which the payload reports in estimate and estimate_method. Use before reasoning about what a region contains, and as the primitive diagnose_pixel_values scans. Not for one pixel's value - use renderdoc_inspect__get_texture_data with include_pixels, or renderdoc_debug__pick_pixel to find which draw touched it.
+    description: >-
+      Sample a rectangular region of one texture or render target on a grid and report per sample its
+      coordinates and decoded channel values, plus per-channel min, max, and mean over the samples.
+      event_id replays to that event first, so the readback is the target's contents at that point in the
+      frame. Requires an uncompressed numeric format: block-compressed, packed, and special formats come
+      back as a structured unsupported result naming the reason instead of sampled zeros. The grid decides
+      how much of the region is read, so a grid coarser than the region makes the statistics a sampled
+      estimate, which the payload reports in estimate and estimate_method. Use before reasoning about what
+      a region contains, and as the primitive diagnose_pixel_values scans. Not for one pixel's value - use
+      renderdoc_inspect__get_texture_data with include_pixels, or renderdoc_debug__pick_pixel to find
+      which draw touched it.
     input_schema:
       type: object
       required: [capture_file, resource_id]
@@ -168,7 +178,17 @@ tools:
       on-success: [renderdoc_debug__pixel_history, renderdoc_analysis__sample_pixel_region]
       on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
   - name: get_frame_overview
-    description: Report what one capture contains in a single replay - API and frame properties, action counts broken into draws, dispatches, and clears, the root-level pass structure with per-pass draw, index, and output-target load, the largest textures and the format histogram, whether this driver exposes counters and whether one of them carries GPU duration, the debug messages a replay to the last event produced, and the structural signals worth acting on, such as a degraded replay, a frame with no draws, a driver with counters but no duration counter, or one texture that dominates texture memory. Pass triangle counts are derived from API draw parameters and the signals are thresholds over structure: both are reported as estimates in estimate_fields and in the summary, and neither is a measurement. Use as the first call on an unfamiliar capture. Not for per-draw cost - use renderdoc_perf__get_action_timing.
+    description: >-
+      Report what one capture contains in a single replay - API and frame properties, action counts broken
+      into draws, dispatches, and clears, the root-level pass structure with per-pass draw, index, and
+      output-target load, the largest textures and the format histogram, whether this driver exposes
+      counters and whether one of them carries GPU duration, the debug messages a replay to the last event
+      produced, and the structural signals worth acting on, such as a degraded replay, a frame with no
+      draws, a driver with counters but no duration counter, or one texture that dominates texture memory.
+      Pass triangle counts are derived from API draw parameters and the signals are thresholds over
+      structure: both are reported as estimates in estimate_fields and in the summary, and neither is a
+      measurement. Use as the first call on an unfamiliar capture. Not for per-draw cost - use
+      renderdoc_perf__get_action_timing.
     input_schema:
       type: object
       required: [capture_file]
@@ -269,7 +289,16 @@ tools:
       on-success: [renderdoc_analysis__get_draw_call_state, renderdoc_perf__get_action_timing]
       on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
   - name: get_pass_timing
-    description: Report GPU duration per pass by joining this driver's timing counter onto the action tree, with each pass's share of the frame, its timed and untimed action counts, and its slowest actions. pass_depth picks the tree level that counts as a pass, 0 being the root actions. A pass reports its own counter sample when the driver sampled it and the sum of its timed actions otherwise, and the method used is reported per pass so a derived number is never read as a measured one. Requires a timing counter: when this driver exposes none the result says so and lists the counters that are available instead of reporting a frame of zero-duration passes. Use after renderdoc_perf__list_counters when you want to pin counter_id. Not for the pass structure without durations - use renderdoc_analysis__analyze_render_passes.
+    description: >-
+      Report GPU duration per pass by joining this driver's timing counter onto the action tree, with each
+      pass's share of the frame, its timed and untimed action counts, and its slowest actions. pass_depth
+      picks the tree level that counts as a pass, 0 being the root actions. A pass reports its own counter
+      sample when the driver sampled it and the sum of its timed actions otherwise, and the method used is
+      reported per pass so a derived number is never read as a measured one. Requires a timing counter:
+      when this driver exposes none the result says so and lists the counters that are available instead
+      of reporting a frame of zero-duration passes. Use after renderdoc_perf__list_counters when you want
+      to pin counter_id. Not for the pass structure without durations - use
+      renderdoc_analysis__analyze_render_passes.
     input_schema:
       type: object
       required: [capture_file]
