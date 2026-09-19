@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
+import inspect
 import json
 import os
 import re
 import runpy
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -87,6 +90,70 @@ def _texture(resource_id, name="tex", width=4, height=4):
     )
 
 
+def _pixel_modification(event_id=2, primitive_id=1, passed=True):
+    """Stand-in for one RenderDoc ``PixelModification``."""
+    return SimpleNamespace(
+        eventId=event_id,
+        primitiveID=primitive_id,
+        fragIndex=0,
+        unboundPS=False,
+        shaderDiscarded=False,
+        depthTestFailed=not passed,
+        stencilTestFailed=False,
+        scissorClipped=False,
+        backfaceCulled=False,
+        preMod=SimpleNamespace(col=SimpleNamespace(floatValue=[0.0, 0.0, 0.0, 1.0])),
+        postMod=SimpleNamespace(col=SimpleNamespace(floatValue=[1.0, 0.0, 0.0, 1.0])),
+        shaderOut=SimpleNamespace(col=SimpleNamespace(floatValue=[1.0, 0.0, 0.0, 1.0])),
+        Passed=lambda: passed,
+    )
+
+
+class _PixelValue:
+    """Stand-in for one RenderDoc ``PixelValue`` — the contents of a pixel.
+
+    ``PickPixel`` returns this, not a ``PixelModification``: it carries the four
+    channels and no event identity. The attributes a caller would read if it
+    mistook this for a ``PixelModification`` raise on purpose, so that mistake is
+    a hard failure in tests instead of a silent one.
+    """
+
+    floatValue = [1.0, 0.0, 0.0, 1.0]
+    uintValue = [1, 0, 0, 1]
+    intValue = [1, 0, 0, 1]
+
+    @property
+    def eventId(self):
+        raise AttributeError("PixelValue carries no eventId; PixelHistory does")
+
+    @property
+    def preMod(self):
+        raise AttributeError("PixelValue carries no preMod; PixelHistory does")
+
+    @property
+    def postMod(self):
+        raise AttributeError("PixelValue carries no postMod; PixelHistory does")
+
+    @property
+    def Passed(self):
+        raise AttributeError("PixelValue carries no Passed(); PixelHistory does")
+
+
+def _debug_trace(controller):
+    """Stand-in for one RenderDoc ``ShaderDebugTrace``.
+
+    ``ShaderDebugTrace`` carries no ``states`` member: the steps only ever exist
+    in the batches ``ContinueDebug`` returns, so the fake controller hands them
+    out there instead of accumulating them on the trace.
+    """
+    return SimpleNamespace(
+        stage=_Enum("ShaderStage.Pixel", 5),
+        debugger=_Enum("ShaderDebugger", 1),
+        inputs=None,
+        sourceVars=None,
+    )
+
+
 class FakeController:
     """Minimal stand-in for RenderDoc's ReplayController."""
 
@@ -94,6 +161,14 @@ class FakeController:
         self.calls: list[tuple] = []
         self.pixel_history = True
         self.shader_debugging = True
+        self.post_vs_data = True
+        self.debug_steps = 1
+        self.debug_states: list = []
+        self.pixel_modifications = [
+            _pixel_modification(event_id=2, primitive_id=1),
+            _pixel_modification(event_id=3, primitive_id=2, passed=False),
+            _pixel_modification(event_id=4, primitive_id=3),
+        ]
         self.actions = [
             _action(1, "Frame", [_action(2, "Draw A", flags=1), _action(3, "Clear B", flags=8)]),
             _action(4, "Draw C", flags=1),
@@ -121,6 +196,7 @@ class FakeController:
             remoteReplay=False,
             pixelHistory=self.pixel_history,
             shaderDebugging=self.shader_debugging,
+            postVSData=self.post_vs_data,
             rgpCapture=False,
         )
 
@@ -173,7 +249,9 @@ class FakeController:
 
     def GetBufferData(self, buffer, offset, length):
         self.calls.append(("buffer-data", int(buffer), offset, length))
-        return self.buffer_bytes
+        if length:
+            return self.buffer_bytes[offset : offset + length]
+        return self.buffer_bytes[offset:]
 
     def GetTextureData(self, texture, sub):
         return b"\x00"
@@ -182,41 +260,40 @@ class FakeController:
         self.calls.append(("save-texture", int(save.resourceId), path))
         Path(path).write_bytes(b"PNG")
 
+    def PickPixel(self, texture, x, y, sub, type_cast):
+        self.calls.append(("pick-pixel", int(texture), x, y))
+        return _PixelValue()
+
     def PixelHistory(self, texture, x, y, sub, type_cast):
         self.calls.append(("pixel-history", int(texture), x, y))
-        return [
-            SimpleNamespace(
-                eventId=2,
-                primitiveID=1,
-                fragIndex=0,
-                unboundPS=False,
-                shaderDiscarded=False,
-                depthTestFailed=False,
-                stencilTestFailed=False,
-                scissorClipped=False,
-                backfaceCulled=False,
-                preMod=SimpleNamespace(col=SimpleNamespace(floatValue=[0.0, 0.0, 0.0, 1.0])),
-                postMod=SimpleNamespace(col=SimpleNamespace(floatValue=[1.0, 0.0, 0.0, 1.0])),
-                shaderOut=SimpleNamespace(col=SimpleNamespace(floatValue=[1.0, 0.0, 0.0, 1.0])),
-                Passed=lambda: True,
-            )
-        ]
+        return list(self.pixel_modifications)
+
+    def ContinueDebug(self, debugger):
+        """RenderDoc returns one batch of debug states per step, [] once done."""
+        self.calls.append(("continue-debug", int(debugger)))
+        if self.debug_steps <= 0:
+            return []
+        self.debug_steps -= 1
+        state = SimpleNamespace(
+            stepIndex=len(self.debug_states),
+            nextInstruction=1,
+            flags=_Enum("ShaderEvents.NoEvent", 0),
+            changes=None,
+        )
+        self.debug_states.append(state)
+        return [state]
 
     def DebugPixel(self, x, y, inputs):
         self.calls.append(("debug-pixel", x, y))
-        return SimpleNamespace(
-            stage=_Enum("ShaderStage.Pixel", 5),
-            states=[
-                SimpleNamespace(
-                    stepIndex=0,
-                    nextInstruction=1,
-                    flags=_Enum("ShaderEvents.NoEvent", 0),
-                    changes=None,
-                )
-            ],
-            inputs=None,
-            sourceVars=None,
-        )
+        return _debug_trace(self)
+
+    def DebugVertex(self, vertid, instid, idx, view):
+        self.calls.append(("debug-vertex", vertid, instid, idx, view))
+        return _debug_trace(self)
+
+    def DebugThread(self, group_id, thread_id):
+        self.calls.append(("debug-thread", list(group_id), list(thread_id)))
+        return _debug_trace(self)
 
     def FreeTrace(self, trace):
         self.calls.append(("free-trace",))
@@ -1091,6 +1168,545 @@ def test_bridge_run_python_script_exposes_renderdoc_globals(monkeypatch, tmp_pat
         "stage": "ShaderStage.Pixel",
         "params": {"a": 1},
     }
+
+
+# --------------------------------------------------------------------------- #
+# Debug domain
+# --------------------------------------------------------------------------- #
+
+
+def _mesh_controller(indices=(0, 1, 0)):
+    """A controller whose post-VS stage reports both a vertex and an index buffer.
+
+    Two vertices are packed first and the index bytes after them in one buffer,
+    so the post-VS index offset selects them the way a real capture would and a
+    short read can be produced by trimming that buffer.
+    """
+    controller = FakeController()
+    vertex_bytes = b"\x00\x00\x80\x3f" * 3 + b"\x00\x00\x00\x40" * 3
+    index_bytes = struct.pack("<{}H".format(len(indices)), *indices)
+    controller.buffer_bytes = vertex_bytes + index_bytes
+    controller.GetPostVSData = lambda instance, view, stage: SimpleNamespace(
+        status=_Enum("MeshDataStatus.Succeeded", 1),
+        numIndices=len(indices),
+        topology=_Enum("Topology.TriangleList", 3),
+        baseVertex=0,
+        vertexResourceId=21,
+        vertexByteOffset=0,
+        vertexByteStride=12,
+        vertexByteSize=len(vertex_bytes),
+        indexResourceId=21,
+        indexByteOffset=len(vertex_bytes),
+        indexByteStride=2,
+        instanced=False,
+        unproject=True,
+        nearPlane=0.0,
+        farPlane=1.0,
+        format=SimpleNamespace(
+            Name=lambda: "R32G32B32_FLOAT",
+            compType=_Enum("CompType.Float", 1),
+            compCount=3,
+        ),
+    )
+    return controller
+
+
+def _faces(lines):
+    """Parse the 1-based vertex references out of an OBJ's face lines."""
+    return [[int(value) for value in line[2:].split()] for line in lines if line.startswith("f ")]
+
+
+def test_debug_operations_are_declared_and_implemented():
+    debug_operations = set(capabilities.DEBUG_TOOLS.values())
+    assert debug_operations <= set(replay.REPLAY_OPERATIONS)
+    assert debug_operations <= set(capabilities.CAPABILITY_GROUPS["debug"])
+    bridge = runpy.run_path(str(BRIDGE), run_name="dcc_mcp_renderdoc_bridge")
+    assert set(replay.REPLAY_OPERATIONS) <= set(bridge["OPERATIONS"])
+
+
+def test_debug_skill_declares_one_tool_per_script():
+    root = Path(replay.__file__).parent / "skills" / "renderdoc-debug"
+    tools = (root / "tools.yaml").read_text(encoding="utf-8")
+    scripts = sorted(path.stem for path in (root / "scripts").glob("*.py"))
+    assert scripts
+    assert sorted(re.findall(r"^  - name: ([a-z_]+)$", tools, re.MULTILINE)) == scripts
+    for name in scripts:
+        assert "source_file: scripts/{}.py".format(name) in tools
+    assert set(capabilities.DEBUG_TOOLS) <= set(scripts)
+
+
+def test_unsupported_backend_report_names_how_to_enable_it(tmp_path):
+    command = _command_root(tmp_path / "missing", with_qrenderdoc=False)
+    assert replay.unsupported_backend("debug", command=str(command)) is not None
+    report = replay.unsupported_backend("debug", command=str(command))
+    assert report["supported"] is False
+    assert report["capability_group"] == "debug"
+    assert report["backend"] == "renderdoc.pyd"
+    assert report["reason"]
+    assert "qrenderdoc" in report["error_message"]
+    assert report["hint"]
+    ready = _command_root(tmp_path / "ready", with_qrenderdoc=True)
+    assert replay.unsupported_backend("debug", command=str(ready)) is None
+
+
+def test_run_debug_operation_reports_a_missing_backend_without_launching(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    monkeypatch.setattr(
+        replay.subprocess, "run", lambda *_a, **_k: pytest.fail("must not launch qrenderdoc")
+    )
+    command = _command_root(tmp_path, with_qrenderdoc=False)
+    report = replay.run_debug_operation(str(capture), "pick_pixel", command=str(command))
+    assert report["supported"] is False
+    assert report["error_message"]
+
+
+def test_debug_capabilities_reports_backend_and_per_tool_flags(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    command = _command_root(tmp_path, with_qrenderdoc=True)
+
+    def fake_run(arguments, **kwargs):
+        Path(kwargs["env"]["DCC_MCP_RENDERDOC_REPLAY_STATUS"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "describe_capture",
+                    "result": {
+                        "capabilities": {
+                            "available": True,
+                            "pixel_history": True,
+                            "shader_debugging": False,
+                            "post_vs_data": True,
+                        }
+                    },
+                    "error": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    report = replay.debug_capabilities(str(capture), command=str(command))
+    assert report["deep"]["available"] is True
+    assert report["capture_checked"] is True
+    assert report["capture"]["flags"]["shader_debugging"] is False
+    assert report["tools"]["pixel_history"]["supported"] is True
+    assert report["tools"]["debug_pixel"]["flag_state"] is False
+    assert report["tools"]["debug_pixel"]["supported"] is False
+    assert report["tools"]["debug_vertex"]["requires_flag"] == "shader_debugging"
+    assert report["tools"]["export_mesh"]["supported"] is True
+    # pick_pixel attributes the pixel through the history, so it needs the flag.
+    assert report["tools"]["pick_pixel"]["requires_flag"] == "pixel_history"
+    assert report["tools"]["pick_pixel"]["supported"] is True
+
+    unchecked = replay.debug_capabilities(command=str(command))
+    assert unchecked["capture"] is None
+    assert unchecked["capture_checked"] is False
+    assert unchecked["tools"]["debug_pixel"]["flag_state"] is None
+    assert unchecked["tools"]["debug_pixel"]["supported"] is True
+
+    missing = replay.debug_capabilities(
+        command=str(_command_root(tmp_path / "off", with_qrenderdoc=False))
+    )
+    assert missing["tools"]["debug_pixel"]["supported"] is False
+    assert missing["tools"]["debug_pixel"]["backend_available"] is False
+
+
+def _load_debug_script(name):
+    path = Path(replay.__file__).parent / "skills" / "renderdoc-debug" / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location("renderdoc_debug_" + name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_debug_scripts_report_an_unreachable_backend(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    monkeypatch.setattr(
+        replay.subprocess, "run", lambda *_a, **_k: pytest.fail("must not launch qrenderdoc")
+    )
+    command = _command_root(tmp_path, with_qrenderdoc=False)
+    monkeypatch.setattr(replay, "probe", lambda *a, **k: capabilities.probe(command=str(command)))
+    result = _load_debug_script("pick_pixel").main(
+        capture_file=str(capture), resource_id=11, x=1, y=2
+    )
+    assert result["success"] is False
+    assert result["error"] == "unsupported_backend"
+    assert "renderdoc.pyd" in result["message"]
+    assert result["context"]["capability_group"] == "debug"
+    assert result["context"]["hint"]
+
+
+def test_debug_capabilities_script_succeeds_without_a_backend(monkeypatch, tmp_path):
+    command = _command_root(tmp_path, with_qrenderdoc=False)
+    monkeypatch.setattr(replay, "probe", lambda *a, **k: capabilities.probe(command=str(command)))
+    result = _load_debug_script("debug_capabilities").main()
+    assert result["success"] is True
+    assert result["context"]["deep"]["available"] is False
+    assert result["context"]["tools"]["debug_pixel"]["supported"] is False
+
+
+def test_bridge_pick_pixel_reports_the_last_passing_draw(monkeypatch, tmp_path):
+    """``pick_pixel`` attributes the pixel through the history, not through PickPixel.
+
+    The fake history is event 2 (passed), event 3 (depth test failed), event 4
+    (passed), so the draw that last landed on the pixel is event 4 — and every
+    event identity in the result has to come from there, because a ``PixelValue``
+    carries none.
+    """
+    status, context = run_bridge(
+        monkeypatch, tmp_path, "pick_pixel", {"event_id": 5, "resource_id": 11, "x": 3, "y": 4}
+    )
+    result = status["result"]
+    assert ("set-event", 5, True) in context.controller.calls
+    assert ("pixel-history", 11, 3, 4) in context.controller.calls
+    assert ("pick-pixel", 11, 3, 4) in context.controller.calls
+    assert result["event_id"] == 5
+    assert result["modification_count"] == 3
+    assert result["hit_event_id"] == 4
+    assert result["hit"]["event_id"] == 4
+    assert result["hit"]["primitive_id"] == 3
+    assert result["hit"]["passed"] is True
+    assert result["hit"]["post_mod"]["col"]["floatValue"][0] == 1.0
+    # PickPixel's return is a PixelValue: pixel contents, no event identity.
+    assert result["pixel_value"] == {
+        "floatValue": [1.0, 0.0, 0.0, 1.0],
+        "uintValue": [1, 0, 0, 1],
+        "intValue": [1, 0, 0, 1],
+    }
+
+    status, _ = run_bridge(monkeypatch, tmp_path, "pick_pixel", {"resource_id": 0, "x": 0, "y": 0})
+    assert "resource_id must be a positive integer" in status["error"]
+
+
+def test_bridge_pick_pixel_requires_pixel_history_support(monkeypatch, tmp_path):
+    controller = FakeController(pixel_history=False)
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "pick_pixel", {"resource_id": 11, "x": 1, "y": 2}, controller
+    )
+    assert "does not support pixel history" in status["error"]
+
+
+def test_bridge_pick_pixel_reports_a_coordinate_nothing_passed(monkeypatch, tmp_path):
+    """No passing modification is an answer, not an empty success."""
+    controller = FakeController()
+    controller.pixel_modifications = [_pixel_modification(event_id=2, passed=False)]
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "pick_pixel", {"resource_id": 11, "x": 1, "y": 2}, controller
+    )
+    result = status["result"]
+    assert status["error"] is None
+    assert result["modification_count"] == 1
+    assert result["hit_event_id"] is None
+    assert result["hit"] is None
+    assert "no draw passed the depth and stencil tests" in result["hit_note"]
+    assert result["pixel_value"]["floatValue"] == [1.0, 0.0, 0.0, 1.0]
+
+
+def test_pixel_value_carries_no_event_identity():
+    """The old bug: reading ``PickPixel``'s ``PixelValue`` as a modification.
+
+    A ``PixelValue`` is the pixel's contents only. The attributes the old
+    ``pick_pixel`` read off it raise here, so reintroducing that code fails the
+    contract test instead of passing against a permissive mock.
+    """
+    value = _PixelValue()
+    assert value.floatValue == [1.0, 0.0, 0.0, 1.0]
+    for name in ("eventId", "preMod", "postMod", "Passed"):
+        with pytest.raises(AttributeError):
+            getattr(value, name)
+
+
+def test_bridge_debug_pixel_can_return_a_summary_without_steps(monkeypatch, tmp_path):
+    status, context = run_bridge(
+        monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2, "detail": "summary"}
+    )
+    result = status["result"]
+    assert result["detail"] == "summary"
+    assert result["step_count"] == 1
+    assert "steps" not in result
+    assert ("free-trace",) in context.controller.calls
+
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2, "detail": "raw"})
+    assert "detail must be 'trace' or 'summary'" in status["error"]
+
+
+def test_bridge_debug_pixel_drives_the_continue_debug_loop(monkeypatch, tmp_path):
+    """A trace is empty until ``ContinueDebug`` is driven, so the loop must run."""
+    controller = FakeController(debug_steps=3)
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    result = status["result"]
+    # One call that records the last step, plus one that reports completion.
+    assert [call for call in context.controller.calls if call[0] == "continue-debug"]
+    assert result["step_count"] == 3
+    assert [step["step_index"] for step in result["steps"]] == [0, 1, 2]
+    assert result["truncated"] is False
+    assert ("free-trace",) in context.controller.calls
+
+
+def test_bridge_debug_caps_the_states_it_collects(monkeypatch, tmp_path):
+    """State collection stops at ``MAX_DEBUG_STEPS`` instead of looping forever."""
+    from dcc_mcp_renderdoc import _replay_bridge
+
+    overrun = _replay_bridge.MAX_DEBUG_STEPS + 5
+    controller = FakeController(debug_steps=overrun)
+    status, context = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    result = status["result"]
+    assert result["step_count"] == _replay_bridge.MAX_DEBUG_STEPS
+    assert context.controller.debug_steps == 5
+
+
+def test_bridge_debug_reports_a_trace_without_a_debugger(monkeypatch, tmp_path):
+    """A trace that cannot be stepped is a failure, not a successful empty trace."""
+    controller = FakeController()
+    controller.DebugPixel = lambda x, y, inputs: SimpleNamespace(
+        stage=_Enum("ShaderStage.Pixel", 5),
+        debugger=None,
+        inputs=None,
+        sourceVars=None,
+    )
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    assert status["result"] is None
+    assert "without a debugger" in status["error"]
+
+
+def test_bridge_debug_reports_an_unsteppable_trace(monkeypatch, tmp_path):
+    """Zero states after stepping is reported as a failure, not as empty success."""
+    controller = FakeController(debug_steps=0)
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_pixel", {"x": 1, "y": 2}, controller)
+    assert status["result"] is None
+    assert "recorded no debug states" in status["error"]
+
+
+def test_bridge_debug_reports_a_missing_trace(monkeypatch, tmp_path):
+    controller = FakeController()
+    controller.DebugThread = lambda group_id, thread_id: None
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_thread", {"event_id": 3}, controller)
+    assert status["result"] is None
+    assert "no shader debug trace" in status["error"]
+
+
+def test_debug_vertex_calls_renderdoc_with_the_documented_four_selectors(monkeypatch, tmp_path):
+    """RenderDoc's ``DebugVertex`` takes exactly ``(vertid, instid, idx, view)``.
+
+    There is no ``instance_offset`` or ``vertex_offset`` parameter to pass: the
+    caller folds the draw's own offsets into the three selectors first.
+    """
+    assert list(inspect.signature(FakeController.DebugVertex).parameters) == [
+        "self",
+        "vertid",
+        "instid",
+        "idx",
+        "view",
+    ]
+    status, context = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "debug_vertex",
+        {"event_id": 3, "vertex_index": 7, "instance": 2, "index": 5, "view": 1},
+    )
+    result = status["result"]
+    calls = [call for call in context.controller.calls if call[0] == "debug-vertex"]
+    assert calls == [("debug-vertex", 7, 2, 5, 1)]
+    assert result["vertex_index"] == 7
+    assert result["instance"] == 2
+    assert result["index"] == 5
+    assert result["view"] == 1
+    assert "instance_offset" not in result
+    assert "vertex_offset" not in result
+
+
+def test_debug_script_never_advertises_drawcall_offsets():
+    """``debug_vertex`` selectors must match ``DebugVertex``'s four parameters."""
+    script = Path(capabilities.__file__).parent / "skills" / "renderdoc-debug" / "scripts"
+    source = (script / "debug_vertex.py").read_text(encoding="utf-8")
+    parameters = set(inspect.signature(_load_debug_script("debug_vertex").main).parameters)
+    assert parameters >= {"vertex_index", "instance", "index", "view"}
+    assert not parameters & {"instance_offset", "vertex_offset"}
+    assert "instance_offset" not in source
+    assert "vertex_offset" not in source
+
+
+def test_bridge_debug_vertex_steps_one_vertex(monkeypatch, tmp_path):
+    controller = FakeController(shader_debugging=False)
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_vertex", {"vertex_index": 3}, controller)
+    assert "does not support shader debugging" in status["error"]
+
+    status, context = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "debug_vertex",
+        {"event_id": 3, "vertex_index": 3, "instance": 2, "max_steps": 5},
+    )
+    result = status["result"]
+    assert ("debug-vertex", 3, 2, 0, 0) in context.controller.calls
+    assert result["vertex_index"] == 3
+    assert result["instance"] == 2
+    assert result["stage"] == "ShaderStage.Pixel"
+    assert result["steps"][0]["step_index"] == 0
+    assert ("free-trace",) in context.controller.calls
+
+
+def test_bridge_debug_thread_steps_one_compute_thread(monkeypatch, tmp_path):
+    controller = FakeController(shader_debugging=False)
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_thread", {"event_id": 3}, controller)
+    assert "does not support shader debugging" in status["error"]
+
+    status, context = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "debug_thread",
+        {"event_id": 3, "group_id": [1, 2, 3], "thread_id": [4, 5]},
+    )
+    result = status["result"]
+    assert ("debug-thread", [1, 2, 3], [4, 5, 0]) in context.controller.calls
+    assert result["group_id"] == [1, 2, 3]
+    assert result["thread_id"] == [4, 5, 0]
+    assert result["steps"][0]["step_index"] == 0
+    assert ("free-trace",) in context.controller.calls
+
+    status, _ = run_bridge(monkeypatch, tmp_path, "debug_thread", {"group_id": "nope"})
+    assert "must be a list of three integers" in status["error"]
+
+
+def test_bridge_export_mesh_writes_obj(monkeypatch, tmp_path):
+    output = tmp_path / "mesh.obj"
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"event_id": 2, "output_file": str(output)},
+        _mesh_controller(),
+    )
+    result = status["result"]
+    assert status["error"] is None
+    assert result["output_format"] == "obj"
+    assert result["vertex_count"] == 2
+    assert result["index_count"] == 3
+    assert result["face_count"] == 1
+    assert result["dropped_faces"] == 0
+    assert result["index_note"] is None
+    assert result["vertex_preview"] == [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert [line for line in lines if line.startswith("v ")] == [
+        "v 1.000000 1.000000 1.000000",
+        "v 2.000000 2.000000 2.000000",
+    ]
+    faces = _faces(lines)
+    assert faces == [[1, 2, 1]]
+    # Every face reference must address a vertex the file actually wrote.
+    assert all(1 <= index <= result["vertex_count"] for face in faces for index in face)
+    assert result["size_bytes"] == output.stat().st_size
+
+
+def test_bridge_export_mesh_drops_faces_outside_the_vertex_window(monkeypatch, tmp_path):
+    """A 4096-vertex window under a 65536-index buffer must not emit dead faces."""
+    output = tmp_path / "mesh.obj"
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"event_id": 2, "output_file": str(output)},
+        _mesh_controller(indices=(0, 1, 5)),
+    )
+    result = status["result"]
+    assert status["error"] is None
+    assert result["index_count"] == 3
+    assert result["vertex_count"] == 2
+    assert result["face_count"] == 0
+    assert result["dropped_faces"] == 1
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert _faces(lines) == []
+    assert [line for line in lines if line.startswith("v ")]
+
+
+def test_bridge_export_mesh_keeps_a_short_index_read(monkeypatch, tmp_path):
+    """A truncated index read decodes its whole prefix instead of collapsing to []."""
+    output = tmp_path / "mesh.obj"
+    controller = _mesh_controller(indices=(0, 1, 0, 1, 1, 0))
+    controller.buffer_bytes = controller.buffer_bytes[:-2]
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"event_id": 2, "output_file": str(output)},
+        controller,
+    )
+    result = status["result"]
+    assert status["error"] is None
+    assert result["num_indices"] == 6
+    assert result["index_count"] == 5
+    assert result["face_count"] == 1
+    assert result["dropped_faces"] == 0
+    assert result["index_note"] and "10 of 12 index bytes" in result["index_note"]
+    assert _faces(output.read_text(encoding="utf-8").splitlines()) == [[1, 2, 1]]
+
+
+def test_bridge_export_mesh_writes_json(monkeypatch, tmp_path):
+    output = tmp_path / "mesh.json"
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"event_id": 2, "output_file": str(output), "preview_vertices": 1},
+        _mesh_controller(),
+    )
+    result = status["result"]
+    assert result["output_format"] == "json"
+    assert result["vertex_preview"] == [[1.0, 1.0, 1.0]]
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["event_id"] == 2
+    assert document["stage"] == "VSOut"
+    assert document["vertices"] == [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+    assert len(document["indices"]) == 3
+    assert document["vertex_format"] == "R32G32B32_FLOAT"
+
+
+def test_bridge_export_mesh_validates_its_request(monkeypatch, tmp_path):
+    status, _ = run_bridge(monkeypatch, tmp_path, "export_mesh", {"event_id": 2})
+    assert "output_file is required" in status["error"]
+
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "export_mesh", {"output_file": str(tmp_path / "mesh.stl")}
+    )
+    assert "must use one of these extensions" in status["error"]
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"output_file": str(tmp_path / "mesh.obj"), "stage": "Nonsense"},
+    )
+    assert "stage must be one of these values" in status["error"]
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "export_mesh",
+        {"output_file": str(tmp_path / "mesh.obj")},
+        FakeController(post_vs_data=False),
+    )
+    assert "does not support post-VS data" in status["error"]
+
+
+def test_bridge_reports_post_vs_data_capability(monkeypatch, tmp_path):
+    status, _ = run_bridge(monkeypatch, tmp_path, "describe_capture", {})
+    assert status["result"]["capabilities"]["post_vs_data"] is True
+
+    controller = FakeController()
+    controller.GetAPIProperties = lambda: SimpleNamespace(
+        pipelineType=_Enum("GraphicsAPI.D3D11", 2),
+        localRenderer=False,
+        degraded=True,
+        pixelHistory=True,
+        shaderDebugging=True,
+    )
+    status, _ = run_bridge(monkeypatch, tmp_path, "describe_capture", {}, controller)
+    assert status["result"]["capabilities"]["post_vs_data"] is False
+    assert status["result"]["capabilities"]["degraded"] is True
 
 
 # --------------------------------------------------------------------------- #

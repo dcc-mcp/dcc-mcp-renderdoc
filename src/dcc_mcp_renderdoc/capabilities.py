@@ -41,9 +41,40 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "get_texture_data",
         "get_buffer_data",
     ),
-    "debug": ("get_pixel_history", "debug_pixel", "get_mesh_data"),
+    "debug": (
+        "pick_pixel",
+        "get_pixel_history",
+        "debug_pixel",
+        "debug_vertex",
+        "debug_thread",
+        "export_mesh",
+        "get_mesh_data",
+    ),
     "perf": ("get_counters", "get_debug_messages"),
     "ext": ("run_python_script",),
+}
+
+#: The renderdoc-debug skill tools and the deep replay operation each drives.
+DEBUG_TOOLS: Dict[str, str] = {
+    "pick_pixel": "pick_pixel",
+    "pixel_history": "get_pixel_history",
+    "debug_pixel": "debug_pixel",
+    "debug_vertex": "debug_vertex",
+    "debug_thread": "debug_thread",
+    "export_mesh": "export_mesh",
+}
+
+#: Per-capture replay flag each debug tool needs on top of the deep backend.
+#: ``None`` means the backend alone is enough for that tool.
+DEBUG_FLAGS: Dict[str, Optional[str]] = {
+    # pick_pixel attributes a pixel to a draw through the pixel history, so it
+    # needs the same per-capture flag as pixel_history.
+    "pick_pixel": "pixel_history",
+    "pixel_history": "pixel_history",
+    "debug_pixel": "shader_debugging",
+    "debug_vertex": "shader_debugging",
+    "debug_thread": "shader_debugging",
+    "export_mesh": "post_vs_data",
 }
 
 ENABLE_HINT = (
