@@ -577,6 +577,10 @@ def test_capabilities_report_the_deep_backend_as_missing(monkeypatch, tmp_path):
         "debug": False,
         "perf": False,
         "ext": False,
+        "counters": False,
+        "messages": False,
+        "timing": False,
+        "overdraw": False,
     }
     assert "qrenderdoc" in status["hint"]
 
@@ -1122,7 +1126,9 @@ def test_bridge_get_counters_enumerates_and_fetches(monkeypatch, tmp_path):
     result = status["result"]
     assert ("fetch-counters", [1]) in context.controller.calls
     assert result["values"][0]["event_id"] == 2
-    assert result["values"][0]["value"]["f"] == 0.5
+    # The union is read through the counter's own resultType, so a float counter
+    # arrives as one number rather than as every union member at once.
+    assert result["values"][0]["value"] == 0.5
 
 
 def test_bridge_get_debug_messages_reports_severity(monkeypatch, tmp_path):
@@ -1780,3 +1786,464 @@ def test_inspect_skill_declares_one_tool_per_script():
     assert sorted(re.findall(r"^  - name: ([a-z_]+)$", tools, re.MULTILINE)) == scripts
     for name in scripts:
         assert "source_file: scripts/{}.py".format(name) in tools
+
+
+# --------------------------------------------------------------------------- #
+# Perf domain
+# --------------------------------------------------------------------------- #
+
+
+def _named_counters(controller, names):
+    """Give each counter its own name and category, so filters are observable."""
+
+    def describe(counter):
+        return SimpleNamespace(
+            name=names.get(int(counter), "counter {}".format(int(counter))),
+            category="gpu" if int(counter) == 1 else "memory",
+            description="event duration" if int(counter) == 1 else "invocations",
+            unit=_Enum("CounterUnit.Seconds", 4)
+            if int(counter) == 1
+            else _Enum("CounterUnit.Ratio", 2),
+            resultType=_Enum("CompType.Float", 1),
+        )
+
+    controller.DescribeCounter = describe
+    return controller
+
+
+def _quad_bytes(z):
+    """One fullscreen quad as four clip-space vertices plus six 16-bit indices."""
+    vertices = (
+        (-1.0, -1.0, z, 1.0),
+        (1.0, -1.0, z, 1.0),
+        (1.0, 1.0, z, 1.0),
+        (-1.0, 1.0, z, 1.0),
+    )
+    vertex_bytes = b"".join(struct.pack("<4f", *vertex) for vertex in vertices)
+    return vertex_bytes + struct.pack("<6H", 0, 1, 2, 0, 2, 3)
+
+
+def _overdraw_controller(depths=(0.0,)):
+    """A controller whose every draw is one fullscreen quad at a given depth.
+
+    Four clip-space vertices spanning the viewport and two triangles between
+    them shade every pixel of the grid exactly twice per draw, so the overdraw
+    arithmetic is assertable instead of approximate. Giving the draws different
+    depths is what makes ``depth_test`` observable: with it on, a farther quad
+    is rejected wherever a nearer one has already written.
+    """
+    quads = [_quad_bytes(z) for z in depths]
+    quad_size = len(quads[0])
+    controller = FakeController()
+    controller.buffer_bytes = b"".join(quads)
+    controller.actions = [
+        _action(10 * (index + 1), "Draw {}".format(index), flags=1) for index in range(len(depths))
+    ]
+    state = {"offset": 0}
+
+    def set_frame_event(event_id, force):
+        controller.calls.append(("set-event", event_id, force))
+        state["offset"] = quad_size * (int(event_id) // 10 - 1)
+
+    controller.SetFrameEvent = set_frame_event
+
+    def post_vs(instance, view, stage):
+        controller.calls.append(("post-vs", instance, view, stage))
+        return SimpleNamespace(
+            status=_Enum("MeshDataStatus.Succeeded", 1),
+            numIndices=6,
+            topology=_Enum("Topology.TriangleList", 3),
+            baseVertex=0,
+            vertexResourceId=21,
+            vertexByteOffset=state["offset"],
+            vertexByteStride=16,
+            vertexByteSize=64,
+            indexResourceId=21,
+            indexByteOffset=state["offset"] + 64,
+            indexByteStride=2,
+            instanced=False,
+            unproject=True,
+            nearPlane=0.0,
+            farPlane=1.0,
+            format=SimpleNamespace(
+                Name=lambda: "R32G32B32A32_FLOAT",
+                compType=_Enum("CompType.Float", 1),
+                compCount=4,
+            ),
+        )
+
+    controller.GetPostVSData = post_vs
+    return controller
+
+
+def _load_perf_script(name):
+    path = Path(replay.__file__).parent / "skills" / "renderdoc-perf" / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location("renderdoc_perf_" + name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_perf_operations_are_declared_and_implemented():
+    perf_operations = set(capabilities.PERF_TOOLS.values())
+    assert perf_operations <= set(replay.REPLAY_OPERATIONS)
+    assert perf_operations <= set(capabilities.CAPABILITY_GROUPS["perf"])
+    bridge = runpy.run_path(str(BRIDGE), run_name="dcc_mcp_renderdoc_bridge")
+    assert set(replay.REPLAY_OPERATIONS) <= set(bridge["OPERATIONS"])
+
+
+def test_perf_skill_declares_one_tool_per_script():
+    root = Path(replay.__file__).parent / "skills" / "renderdoc-perf"
+    tools = (root / "tools.yaml").read_text(encoding="utf-8")
+    scripts = sorted(path.stem for path in (root / "scripts").glob("*.py"))
+    assert scripts
+    assert sorted(re.findall(r"^  - name: ([a-z_]+)$", tools, re.MULTILINE)) == scripts
+    for name in scripts:
+        assert "source_file: scripts/{}.py".format(name) in tools
+    assert set(capabilities.PERF_TOOLS) <= set(scripts)
+
+
+def test_capability_probe_advertises_the_perf_feature_flags(tmp_path):
+    """``counters`` and ``overdraw`` must be answerable without running a replay."""
+    command = _command_root(tmp_path / "ready", with_qrenderdoc=True)
+    status = capabilities.probe(command=str(command))
+    assert status["capabilities"]["counters"] is True
+    assert status["capabilities"]["overdraw"] is True
+    assert status["capabilities"]["timing"] is True
+    assert status["capabilities"]["messages"] is True
+    missing = _command_root(tmp_path / "off", with_qrenderdoc=False)
+    offline = capabilities.probe(command=str(missing))
+    assert offline["capabilities"]["counters"] is False
+    assert offline["capabilities"]["overdraw"] is False
+
+
+def test_bridge_describe_perf_reports_counter_and_timing_availability(monkeypatch, tmp_path):
+    status, _ = run_bridge(monkeypatch, tmp_path, "describe_perf", {})
+    result = status["result"]
+    assert result["counter_count"] == 2
+    assert result["flags"] == {"counters": True, "timing": True, "post_vs_data": True}
+    # The duration counter is picked by name, not by a hard-coded ordinal.
+    assert result["timing_counter"]["id"] == 1
+    assert result["counter_truncated"] is False
+
+
+def test_bridge_describe_perf_reports_no_timing_counter_when_none_exist(monkeypatch, tmp_path):
+    controller = FakeController()
+    controller.EnumerateCounters = lambda: []
+    status, _ = run_bridge(monkeypatch, tmp_path, "describe_perf", {}, controller)
+    result = status["result"]
+    assert result["flags"]["counters"] is False
+    assert result["flags"]["timing"] is False
+    assert result["timing_counter"] is None
+
+
+def test_bridge_get_counters_filters_the_catalogue(monkeypatch, tmp_path):
+    controller = FakeController()
+    _named_counters(controller, {1: "GPU Duration", 2: "PS Invocations"})
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "get_counters", {"name_filter": "invocations"}, controller
+    )
+    assert [entry["id"] for entry in status["result"]["counters"]] == [2]
+
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "get_counters", {"category_filter": "gpu"}, controller
+    )
+    assert [entry["id"] for entry in status["result"]["counters"]] == [1]
+
+
+def test_bridge_fetch_counters_bounds_the_event_range_and_names_missing_ids(monkeypatch, tmp_path):
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "get_counters", {"fetch": True, "counter_ids": [1, 99]}
+    )
+    result = status["result"]
+    assert result["missing_counter_ids"] == [99]
+    assert result["value_count"] == 1
+    assert result["values"][0]["value"] == 0.5
+
+    # The fake samples event 2, so a range starting later matches nothing and
+    # reports that, instead of looking like a capture with no counter data.
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "get_counters",
+        {"fetch": True, "first_event_id": 5, "last_event_id": 9},
+    )
+    result = status["result"]
+    assert result["value_count"] == 0
+    assert result["values"] == []
+    assert result["first_event_id"] == 5
+
+
+def test_bridge_get_debug_messages_filters_and_sets_the_event(monkeypatch, tmp_path):
+    status, context = run_bridge(monkeypatch, tmp_path, "get_debug_messages", {"event_id": 3})
+    result = status["result"]
+    assert ("set-event", 3, True) in context.controller.calls
+    assert result["message_count"] == 1
+    assert result["unfiltered_message_count"] == 1
+
+    status, _ = run_bridge(monkeypatch, tmp_path, "get_debug_messages", {"severity_filter": "high"})
+    result = status["result"]
+    assert result["messages"] == []
+    assert result["message_count"] == 0
+    # The filter is reported, so an empty list reads as "filtered out" rather
+    # than as a replay that produced no messages.
+    assert result["severity_filter"] == "high"
+    assert result["unfiltered_message_count"] == 1
+
+
+def test_bridge_get_action_timing_joins_the_timing_counter_onto_actions(monkeypatch, tmp_path):
+    status, _ = run_bridge(monkeypatch, tmp_path, "get_action_timing", {})
+    result = status["result"]
+    assert result["supported"] is True
+    assert result["timing_counter"]["id"] == 1
+    # Only event 2 carries a sample in the fake, so it is the only timed action.
+    assert [row["event_id"] for row in result["actions"]] == [2]
+    assert result["action_count"] == 1
+    assert result["totals"] == {
+        "unit": "CounterUnit.Seconds",
+        "total": 0.5,
+        "mean": 0.5,
+        "min": 0.5,
+        "max": 0.5,
+    }
+    assert result["slowest"][0]["event_id"] == 2
+    assert result["passes"] == [{"event_id": 2, "name": "Draw A", "count": 1, "total": 0.5}]
+
+
+def test_bridge_get_action_timing_names_the_gap_instead_of_reporting_an_empty_frame(
+    monkeypatch, tmp_path
+):
+    """A driver with no timing counter must not look like a very fast frame."""
+    controller = FakeController()
+    controller.EnumerateCounters = lambda: [_Enum("GPUCounter.PSInvocations", 2)]
+    _named_counters(controller, {2: "PS Invocations"})
+    status, _ = run_bridge(monkeypatch, tmp_path, "get_action_timing", {}, controller)
+    result = status["result"]
+    assert result["supported"] is False
+    assert result["timing_counter"] is None
+    assert "no GPU timing counter" in result["error_message"]
+    assert [entry["id"] for entry in result["available_counters"]] == [2]
+    assert result["actions"] == []
+
+    status, _ = run_bridge(monkeypatch, tmp_path, "get_action_timing", {"counter_id": 77})
+    assert "counter 77 is not exposed" in status["result"]["error_message"]
+
+
+def test_bridge_get_overdraw_counts_coverage_and_exports_a_png(monkeypatch, tmp_path):
+    """One fullscreen quad covers every pixel once, so overdraw is exactly 1x.
+
+    The quad is two triangles sharing a diagonal, and a pixel centre landing
+    exactly on that diagonal belongs to one triangle or the other, never both.
+    Getting the fill rule wrong is invisible in the covered-pixel count and
+    shows up only here, as a phantom second layer along the seam.
+    """
+    output = tmp_path / "overdraw.png"
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "get_overdraw",
+        {"width": 16, "height": 16, "output_file": str(output)},
+        _overdraw_controller(),
+    )
+    assert status["error"] is None
+    result = status["result"]
+    assert result["draw_count"] == 1
+    assert result["triangle_count"] == 2
+    assert result["covered_pixels"] == 256
+    assert result["fragment_count"] == 256
+    assert result["average_overdraw"] == 1.0
+    assert result["max_overdraw"] == 1
+    assert result["fill_ratio"] == 1.0
+    assert result["output_format"] == "png"
+    assert result["size_bytes"] == output.stat().st_size
+    # These figures are rasterised on the CPU, not sampled by RenderDoc's GPU
+    # quad-overdraw overlay, so the payload must say so next to the numbers.
+    assert result["method"] == "cpu_rasterised_estimate"
+    # A PNG the bridge wrote itself still has to be a real PNG.
+    header = output.read_bytes()
+    assert header[:8] == b"\x89PNG\r\n\x1a\n"
+    assert header[12:16] == b"IHDR"
+    assert struct.unpack(">II", header[16:24]) == (16, 16)
+
+
+def test_bridge_get_overdraw_rejects_farther_geometry_when_depth_testing(monkeypatch, tmp_path):
+    """Stacked quads: without depth testing each shades every pixel, with it only the near one."""
+    params = {"width": 16, "height": 16}
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "get_overdraw", params, _overdraw_controller((0.0, 0.5))
+    )
+    result = status["result"]
+    assert result["fragment_count"] == 512
+    assert result["average_overdraw"] == 2.0
+    assert result["max_overdraw"] == 2
+
+    status, _ = run_bridge(
+        monkeypatch,
+        tmp_path,
+        "get_overdraw",
+        dict(params, depth_test=True),
+        _overdraw_controller((0.0, 0.5)),
+    )
+    result = status["result"]
+    assert result["depth_test"] is True
+    assert result["fragment_count"] == 256
+    assert result["average_overdraw"] == 1.0
+    assert result["draw_count"] == 2
+
+
+def test_bridge_get_overdraw_reports_a_capture_without_post_vs_data(monkeypatch, tmp_path):
+    controller = _overdraw_controller()
+    controller.post_vs_data = False
+    status, _ = run_bridge(monkeypatch, tmp_path, "get_overdraw", {}, controller)
+    assert "does not support post-VS data" in status["error"]
+
+    status, _ = run_bridge(
+        monkeypatch, tmp_path, "get_overdraw", {"output_file": str(tmp_path / "x.bmp")}
+    )
+    assert "output_file must use one of these extensions" in status["error"]
+
+
+def test_run_perf_operation_reports_a_missing_backend_without_launching(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    monkeypatch.setattr(
+        replay.subprocess, "run", lambda *_a, **_k: pytest.fail("must not launch qrenderdoc")
+    )
+    command = _command_root(tmp_path / "missing", with_qrenderdoc=False)
+    report = replay.run_perf_operation(str(capture), "get_counters", command=str(command))
+    assert report["supported"] is False
+    assert report["capability_group"] == "perf"
+    assert report["error_message"]
+
+
+def test_perf_capabilities_reports_backend_and_per_tool_flags(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    command = _command_root(tmp_path, with_qrenderdoc=True)
+
+    def fake_run(arguments, **kwargs):
+        Path(kwargs["env"]["DCC_MCP_RENDERDOC_REPLAY_STATUS"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "describe_perf",
+                    "result": {
+                        "replay": {"available": True, "post_vs_data": True},
+                        "counter_count": 2,
+                        "timing_counter": {"id": 1, "name": "GPU Duration"},
+                        "counters": [],
+                        "flags": {"counters": True, "timing": False, "post_vs_data": True},
+                    },
+                    "error": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    report = replay.perf_capabilities(str(capture), command=str(command))
+    assert report["deep"]["available"] is True
+    assert report["capture_checked"] is True
+    assert report["capture"]["flags"]["timing"] is False
+    assert report["timing_counter"]["id"] == 1
+    assert report["tools"]["list_counters"]["requires_flag"] is None
+    assert report["tools"]["list_counters"]["supported"] is True
+    assert report["tools"]["fetch_counters"]["requires_flag"] == "counters"
+    assert report["tools"]["fetch_counters"]["supported"] is True
+    # No timing counter on this driver, so timing is off but overdraw is not.
+    assert report["tools"]["get_action_timing"]["flag_state"] is False
+    assert report["tools"]["get_action_timing"]["supported"] is False
+    assert report["tools"]["analyze_overdraw"]["requires_flag"] == "post_vs_data"
+    assert report["tools"]["analyze_overdraw"]["supported"] is True
+    assert report["tools"]["get_debug_messages"]["supported"] is True
+
+    unchecked = replay.perf_capabilities(command=str(command))
+    assert unchecked["capture"] is None
+    assert unchecked["capture_checked"] is False
+    assert unchecked["tools"]["get_action_timing"]["flag_state"] is None
+    assert unchecked["tools"]["get_action_timing"]["supported"] is True
+
+    missing = replay.perf_capabilities(
+        command=str(_command_root(tmp_path / "off", with_qrenderdoc=False))
+    )
+    assert missing["tools"]["analyze_overdraw"]["supported"] is False
+    assert missing["tools"]["analyze_overdraw"]["backend_available"] is False
+
+
+def test_perf_capabilities_script_succeeds_without_a_backend(monkeypatch, tmp_path):
+    command = _command_root(tmp_path, with_qrenderdoc=False)
+    monkeypatch.setattr(replay, "probe", lambda *a, **k: capabilities.probe(command=str(command)))
+    result = _load_perf_script("perf_capabilities").main()
+    assert result["success"] is True
+    assert result["context"]["deep"]["available"] is False
+    assert result["context"]["tools"]["analyze_overdraw"]["supported"] is False
+    assert result["context"]["capabilities"]["counters"] is False
+
+
+def test_perf_scripts_report_an_unreachable_backend(monkeypatch, tmp_path):
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    monkeypatch.setattr(
+        replay.subprocess, "run", lambda *_a, **_k: pytest.fail("must not launch qrenderdoc")
+    )
+    command = _command_root(tmp_path / "missing", with_qrenderdoc=False)
+    monkeypatch.setattr(replay, "probe", lambda *a, **k: capabilities.probe(command=str(command)))
+
+    result = _load_perf_script("list_counters").main(capture_file=str(capture))
+    assert result["success"] is False
+    assert result["error"] == "unsupported_backend"
+    assert "renderdoc.pyd" in result["message"]
+    assert result["context"]["capability_group"] == "perf"
+    assert result["context"]["hint"]
+
+    result = _load_perf_script("analyze_overdraw").main(capture_file=str(capture))
+    assert result["success"] is False
+    assert result["error"] == "unsupported_backend"
+
+    result = _load_perf_script("get_action_timing").main(capture_file=str(capture))
+    assert result["success"] is False
+    assert result["error"] == "unsupported_backend"
+
+
+def test_perf_scripts_report_a_capture_without_the_needed_capability(monkeypatch, tmp_path):
+    """A reachable backend plus a missing per-capture flag is its own explicit error."""
+    capture = tmp_path / "capture.rdc"
+    capture.write_bytes(b"rdc")
+    command = _command_root(tmp_path, with_qrenderdoc=True)
+    # ``require`` resolves the backend through ``capabilities.probe``, and the
+    # scripts take no ``command`` argument, so both modules have to see the fake
+    # root or the host goes looking for a real qrenderdoc on this machine.
+    real_probe = capabilities.probe
+    monkeypatch.setattr(capabilities, "probe", lambda *a, **k: real_probe(command=str(command)))
+    monkeypatch.setattr(replay, "probe", lambda *a, **k: real_probe(command=str(command)))
+    monkeypatch.setattr(replay, "_resolve_qrenderdoc", lambda command=None: command)
+
+    def fake_run(arguments, **kwargs):
+        Path(kwargs["env"]["DCC_MCP_RENDERDOC_REPLAY_STATUS"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "get_action_timing",
+                    "result": {
+                        "supported": False,
+                        "timing_counter": None,
+                        "error_message": "this capture's replay exposes no GPU timing counter",
+                        "hint": "call list_counters to see what this driver exposes",
+                        "available_counters": [],
+                    },
+                    "error": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    result = _load_perf_script("get_action_timing").main(
+        capture_file=str(capture), command=str(command)
+    )
+    assert result["success"] is False
+    assert result["error"] == "unsupported_capture"
+    assert "no GPU timing counter" in result["message"]
+    assert result["context"]["hint"]

@@ -26,6 +26,8 @@ from .capabilities import (
     DEBUG_TOOLS,
     DEEP_BACKEND,
     ENABLE_HINT,
+    PERF_FLAGS,
+    PERF_TOOLS,
     group_for,
     probe,
     require,
@@ -58,6 +60,9 @@ REPLAY_OPERATIONS = (
     "debug_thread",
     "get_counters",
     "get_debug_messages",
+    "describe_perf",
+    "get_action_timing",
+    "get_overdraw",
     "run_python_script",
 )
 
@@ -142,6 +147,78 @@ def run_debug_operation(
     exception.
     """
     unsupported = unsupported_backend("debug", command=command)
+    if unsupported is not None:
+        return unsupported
+    return run_replay_operation(
+        capture_file, operation, params, timeout_secs=timeout_secs, command=command
+    )
+
+
+def perf_capabilities(
+    capture_file: Optional[str] = None, command: Optional[str] = None
+) -> dict[str, Any]:
+    """Report the perf backend, its per-capture flags, and what each tool needs.
+
+    Pass ``capture_file`` to also open the capture and read the per-capture facts
+    only a replay can answer — whether this driver exposes counters at all,
+    whether one of them carries GPU duration, and whether post-VS geometry can
+    be read back for the overdraw estimate. Without it the report covers the
+    backend only and leaves each flag state ``None``.
+    """
+    status = probe(command)
+    flags = None
+    capture = None
+    timing_counter = None
+    if capture_file and status["capabilities"].get("perf"):
+        described = run_replay_operation(capture_file, "describe_perf", command=command)
+        payload = described["result"]
+        flags = payload.get("flags") or {}
+        timing_counter = payload.get("timing_counter")
+        capture = {
+            "capture_file": described["capture_file"],
+            "flags": flags,
+            "counter_count": payload.get("counter_count"),
+        }
+    tools = {}
+    for tool, operation in PERF_TOOLS.items():
+        flag = PERF_FLAGS.get(tool)
+        backend_available = bool(status["capabilities"].get("perf"))
+        flag_state = None if (flag is None or flags is None) else bool(flags.get(flag))
+        tools[tool] = {
+            "operation": operation,
+            "requires_flag": flag,
+            "backend_available": backend_available,
+            "flag_state": flag_state,
+            "supported": backend_available and (flag_state is None or flag_state),
+        }
+    return {
+        "baseline": status["baseline"],
+        "deep": status["deep"],
+        "capabilities": status["capabilities"],
+        "capture": capture,
+        "capture_checked": capture is not None,
+        "timing_counter": timing_counter,
+        "tools": tools,
+        "hint": status["hint"],
+    }
+
+
+def run_perf_operation(
+    capture_file: str,
+    operation: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    timeout_secs: int = 300,
+    command: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run one perf-group replay operation, or report the backend as unreachable.
+
+    The perf tools must never crash when ``renderdoc.pyd`` is absent, so an
+    unreachable backend comes back as a structured report for the caller to turn
+    into an explicit "unsupported, here is how to enable it" result instead of an
+    exception.
+    """
+    unsupported = unsupported_backend("perf", command=command)
     if unsupported is not None:
         return unsupported
     return run_replay_operation(

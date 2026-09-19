@@ -17,6 +17,7 @@ import os
 import re
 import struct
 import sys
+import zlib
 
 SCHEMA_VERSION = 1
 
@@ -47,6 +48,36 @@ _SAVE_FORMATS = {
 }
 #: Post-VS mesh exports this bridge can write; the extension picks the format.
 _MESH_EXPORT_FORMATS = {".json": "json", ".obj": "obj"}
+#: Overdraw exports this bridge can write; the extension picks the format.
+_OVERDRAW_EXPORT_FORMATS = {".png": "png", ".ppm": "ppm"}
+#: Grid the overdraw analysis falls back to when the caller names no size. A CPU
+#: rasteriser costs one pass per covered triangle, so the default stays small and
+#: deterministic instead of following the capture's own viewport.
+_OVERDRAW_DEFAULT_WIDTH = 256
+_OVERDRAW_DEFAULT_HEIGHT = 144
+#: Ceilings that keep one overdraw request bounded: draws per request, triangles
+#: and vertices per draw, and rasterised samples per request.
+MAX_OVERDRAW_DRAWS = 512
+MAX_OVERDRAW_TRIANGLES = 200000
+MAX_OVERDRAW_VERTICES = 262144
+MAX_OVERDRAW_SAMPLES = 4000000
+#: How the overdraw figures were produced. RenderDoc's quad-overdraw overlay is a
+#: GPU pass that needs a window, so headless replays cannot run it; these
+#: numbers are rasterised from post-VS geometry on the CPU instead. Reported in
+#: the payload so an agent never reads them as GPU-measured.
+_OVERDRAW_METHOD = "cpu_rasterised_estimate"
+#: Counter name fragments that carry per-event GPU timing, most specific first.
+#: The duration counter has no stable ID across APIs and drivers, so the choice
+#: is made by name rather than by ordinal.
+_TIMING_COUNTER_MARKERS = ("gpu duration", "duration", "elapsed time", "elapsed", "time")
+#: How one ``CounterResult`` union is read, keyed by the ``CompType`` RenderDoc
+#: reported for that counter: ``(marker, member, narrower member, as_float)``.
+_COUNTER_VALUE_MEMBERS = (
+    ("Float", "f", None, True),
+    ("Double", "d", None, True),
+    ("SInt", "i64", "i32", False),
+    ("UInt", "u64", "u32", False),
+)
 
 
 def _int(value, default=0):
@@ -823,11 +854,11 @@ def _op_get_buffer_data(controller, rd, params, context):
     }
 
 
-def _decode_vertices(raw, stride, comp_count):
+def _decode_vertices(raw, stride, comp_count, limit=MAX_VERTICES):
     if stride <= 0 or comp_count <= 0:
         return []
     vertices = []
-    count = min(len(raw) // stride, MAX_VERTICES)
+    count = min(len(raw) // stride, limit)
     for index in range(count):
         base = index * stride
         chunk = raw[base : base + comp_count * 4]
@@ -1348,80 +1379,745 @@ def _op_debug_thread(controller, rd, params, context):
     )
 
 
-def _op_get_counters(controller, rd, params, context):
-    del context
-    event_id = _set_event(controller, params.get("event_id"))
-    limit = _clamp(params.get("limit"), 1, 5000, 200)
-    available = controller.EnumerateCounters()
-    counters = []
-    for counter in available[:limit]:
+def _counter_number(raw, as_float):
+    try:
+        return float(raw) if as_float else int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _counter_value(value, result_type):
+    """Read one ``CounterResult`` union through the type RenderDoc reported.
+
+    A ``CounterResult`` carries every union member at once, so handing the whole
+    union to the host would ship a bag of aliases with no way to tell which one
+    is meaningful. The counter's ``resultType`` names the member, so this
+    returns one number -- or, for a type this bridge does not recognise, the
+    described union, so the sample still arrives as data instead of as ``None``.
+    """
+    union = getattr(value, "value", value)
+    text = _text(result_type)
+    for marker, member, narrower, as_float in _COUNTER_VALUE_MEMBERS:
+        if marker not in text:
+            continue
+        raw = getattr(union, member, None)
+        if raw is None and narrower is not None:
+            raw = getattr(union, narrower, None)
+        if raw is not None:
+            return _counter_number(raw, as_float)
+    return _describe(union)
+
+
+def _counter_descriptions(controller, counters):
+    """Describe counters as ``(native, info)`` pairs, keeping the native handle.
+
+    ``FetchCounters`` accepts only the native objects ``EnumerateCounters``
+    returned, so a caller that wants to fetch has to keep them beside the
+    JSON-ready description instead of re-deriving them from the integer IDs.
+    """
+    entries = []
+    for counter in counters:
+        info = {"id": _int(counter)}
         try:
             description = controller.DescribeCounter(counter)
-            counters.append(
-                {
-                    "id": _int(counter),
-                    "name": _text(description.name),
-                    "category": _text(description.category),
-                    "description": _text(description.description),
-                    "unit": _enum(description.unit),
-                    "result_type": _enum(getattr(description, "resultType", "")),
-                }
-            )
         except BaseException as exc:
-            counters.append(
-                {"id": _int(counter), "error": "{}: {}".format(type(exc).__name__, exc)}
-            )
+            info["error"] = "{}: {}".format(type(exc).__name__, exc)
+            entries.append((counter, info))
+            continue
+        info.update(
+            {
+                "name": _text(description.name),
+                "category": _text(description.category),
+                "description": _text(description.description),
+                "unit": _enum(description.unit),
+                "result_type": _enum(getattr(description, "resultType", "")),
+            }
+        )
+        entries.append((counter, info))
+    return entries
+
+
+def _find_timing_counter(entries, requested_id=None):
+    """Pick the counter that carries per-event GPU duration, if this capture has one.
+
+    RenderDoc's duration counter has no stable ID across APIs and drivers, so the
+    choice is made by name, most specific marker first. An explicit
+    ``requested_id`` overrides the scan, which is how a caller that already ran
+    ``list_counters`` pins the exact counter it wants.
+    """
+    if requested_id is not None:
+        wanted = _int(requested_id)
+        for native, info in entries:
+            if info["id"] == wanted:
+                return native, info
+        return None
+    for marker in _TIMING_COUNTER_MARKERS:
+        for native, info in entries:
+            if marker in _text(info.get("name", "")).casefold():
+                return native, info
+    return None
+
+
+def _perf_counters(controller, params):
+    """Enumerate and describe counters, applying the shared name/category filters."""
+    entries = _counter_descriptions(controller, controller.EnumerateCounters())
+    name_filter = _text(params.get("name_filter", "") or "").strip().casefold()
+    category_filter = _text(params.get("category_filter", "") or "").strip().casefold()
+    if not name_filter and not category_filter:
+        return entries
+    kept = []
+    for native, info in entries:
+        if name_filter and name_filter not in _text(info.get("name", "")).casefold():
+            continue
+        if category_filter and category_filter not in _text(info.get("category", "")).casefold():
+            continue
+        kept.append((native, info))
+    return kept
+
+
+def _op_get_counters(controller, rd, params, context):
+    """Describe the counters this replay exposes, and optionally fetch their values.
+
+    ``list_counters`` drives this with ``fetch`` unset to read the catalogue;
+    ``fetch_counters`` sets it to sample the selected counters, optionally
+    narrowed to one event range, so a caller does not have to take the whole
+    frame when one draw is what it is profiling.
+    """
+    del rd, context
+    event_id = _set_event(controller, params.get("event_id"))
+    limit = _clamp(params.get("limit"), 1, 5000, 200)
+    entries = _perf_counters(controller, params)
     result = {
         "event_id": event_id,
         "limit": limit,
-        "counter_count": len(available),
-        "truncated": len(available) > limit,
-        "counters": counters,
+        "counter_count": len(entries),
+        "truncated": len(entries) > limit,
+        "counters": [info for _native, info in entries[:limit]],
         "values": None,
     }
     if params.get("fetch"):
         requested = params.get("counter_ids") or []
-        selected = []
         if requested:
             wanted = set(_int(item) for item in requested)
-            selected = [counter for counter in available if _int(counter) in wanted]
+            selected = [native for native, info in entries if info["id"] in wanted]
+            missing = sorted(wanted - set(info["id"] for _native, info in entries))
         else:
-            selected = list(available)
+            selected = [native for native, _info in entries]
+            missing = []
+        result["fetched_counter_ids"] = [_int(native) for native in selected]
+        result["missing_counter_ids"] = missing
+        types = {}
+        for _native, info in entries:
+            types[info["id"]] = info.get("result_type", "")
+        first_event = params.get("first_event_id")
+        last_event = params.get("last_event_id")
+        first_event = None if first_event is None else _int(first_event)
+        last_event = None if last_event is None else _int(last_event)
         values = []
+        matched = 0
         for value in controller.FetchCounters(selected):
-            values.append(
-                {
-                    "counter": _int(value.counter),
-                    "event_id": _int(value.eventId),
-                    "value": _describe(getattr(value, "value", None)),
-                }
-            )
+            counter_id = _int(value.counter)
+            occurrence = _int(value.eventId)
+            if first_event is not None and occurrence < first_event:
+                continue
+            if last_event is not None and occurrence > last_event:
+                continue
+            matched += 1
+            if len(values) < MAX_ITEMS:
+                values.append(
+                    {
+                        "counter": counter_id,
+                        "event_id": occurrence,
+                        "value": _counter_value(value, types.get(counter_id, "")),
+                    }
+                )
+        result["value_count"] = matched
         result["values"] = values
+        result["values_truncated"] = matched > len(values)
+        result["first_event_id"] = first_event
+        result["last_event_id"] = last_event
     return result
 
 
 def _op_get_debug_messages(controller, rd, params, context):
+    """Report the debug, warning, and error messages a replay produced.
+
+    RenderDoc accumulates these as the replay progresses, so an ``event_id``
+    replays up to that event first and the messages reported are the ones the
+    frame had produced by then.
+    """
     del rd, context
+    event_id = _set_event(controller, params.get("event_id"))
     limit = _clamp(params.get("limit"), 1, 5000, 200)
+    offset = _clamp(params.get("offset"), 0, 10000000, 0)
+    severity_filter = _text(params.get("severity_filter", "") or "").strip().casefold()
+    category_filter = _text(params.get("category_filter", "") or "").strip().casefold()
     messages = controller.GetDebugMessages()
-    entries = []
-    for message in messages[:limit]:
-        entries.append(
+    matched = []
+    for message in messages:
+        severity = _enum(getattr(message, "severity", ""))
+        category = _enum(getattr(message, "category", ""))
+        if severity_filter and severity_filter not in _text(severity).casefold():
+            continue
+        if category_filter and category_filter not in _text(category).casefold():
+            continue
+        matched.append(
             {
                 "event_id": _int(getattr(message, "eventId", 0)),
-                "category": _enum(getattr(message, "category", "")),
-                "severity": _enum(getattr(message, "severity", "")),
+                "category": category,
+                "severity": severity,
                 "source": _enum(getattr(message, "source", "")),
                 "id": _int(getattr(message, "messageID", 0)),
                 "description": _text(getattr(message, "description", "")),
             }
         )
     return {
+        "event_id": event_id,
+        "offset": offset,
         "limit": limit,
-        "message_count": len(messages),
-        "truncated": len(messages) > limit,
-        "messages": entries,
+        "severity_filter": severity_filter or None,
+        "category_filter": category_filter or None,
+        "message_count": len(matched),
+        "unfiltered_message_count": len(messages),
+        "truncated": len(matched) > offset + limit,
+        "messages": matched[offset : offset + limit],
     }
+
+
+def _op_describe_perf(controller, rd, params, context):
+    """Report what the performance tools can do with this capture right now.
+
+    The perf tools are gated on two different things: the deep backend (checked
+    host-side) and per-capture facts only a replay can answer -- whether this
+    driver exposes counters at all, whether one of them carries GPU duration,
+    and whether post-VS geometry can be read back. All three are read in one
+    replay so ``perf_capabilities`` costs a single launch.
+    """
+    del rd, params, context
+    entries = _counter_descriptions(controller, controller.EnumerateCounters())
+    timing = _find_timing_counter(entries)
+    replay = _replay_capabilities(controller)
+    return {
+        "replay": replay,
+        "counter_count": len(entries),
+        "timing_counter": None if timing is None else timing[1],
+        "counters": [info for _native, info in entries[:MAX_ITEMS]],
+        "counter_truncated": len(entries) > MAX_ITEMS,
+        "flags": {
+            "counters": len(entries) > 0,
+            "timing": timing is not None,
+            "post_vs_data": bool(replay.get("post_vs_data")),
+        },
+    }
+
+
+def _op_get_action_timing(controller, rd, params, context):
+    """Report per-action GPU duration and the aggregates over them.
+
+    RenderDoc stores no duration on an action: the number comes from the timing
+    counter this driver exposes, sampled per event and joined back onto the
+    action tree. When no timing counter exists the result says so explicitly and
+    lists the counters that are available, rather than reporting an empty frame.
+    """
+    del context
+    max_depth = _clamp(params.get("max_depth"), 0, 32, 32)
+    offset = _clamp(params.get("offset"), 0, 10000000, 0)
+    limit = _clamp(params.get("limit"), 1, 20000, 200)
+    slowest_limit = _clamp(params.get("slowest"), 0, 500, 20)
+    name_filter = _text(params.get("name_filter", "") or "").strip().casefold()
+    flag_filter = _text(params.get("flag_filter", "") or "").strip().casefold()
+    entries = _counter_descriptions(controller, controller.EnumerateCounters())
+    found = _find_timing_counter(entries, params.get("counter_id"))
+    if found is None:
+        return {
+            "supported": False,
+            "timing_counter": None,
+            "error_message": (
+                "this capture's replay exposes no GPU timing counter"
+                if params.get("counter_id") is None
+                else "counter {} is not exposed by this capture's replay".format(
+                    _int(params.get("counter_id"))
+                )
+            ),
+            "counter_count": len(entries),
+            "available_counters": [info for _native, info in entries[:MAX_ITEMS]],
+            "hint": "call list_counters to see what this driver exposes",
+            "actions": [],
+            "slowest": [],
+            "passes": [],
+        }
+    native, info = found
+    durations = {}
+    for value in controller.FetchCounters([native]):
+        sampled = _counter_value(value, info.get("result_type", ""))
+        # Only keep real numbers. A counter whose union carries no readable
+        # member for its declared type would otherwise land here as a dict of
+        # raw members and blow up with a TypeError further down, where the
+        # totals are summed.
+        if isinstance(sampled, (int, float)) and not isinstance(sampled, bool):
+            durations[_int(value.eventId)] = sampled
+    rows = []
+
+    def visit(summary):
+        if name_filter and name_filter not in summary["name"].casefold():
+            return
+        if flag_filter and flag_filter not in [name.casefold() for name in summary["flag_names"]]:
+            return
+        event_id = summary["event_id"]
+        if event_id not in durations:
+            return
+        rows.append(
+            {
+                "event_id": event_id,
+                "action_id": summary["action_id"],
+                "parent_event_id": summary["parent_event_id"],
+                "name": summary["name"],
+                "duration": durations[event_id],
+            }
+        )
+
+    _walk_actions(controller, rd, controller.GetRootActions(), 0, max_depth, None, visit)
+    timed = [row for row in rows if row["duration"] is not None]
+    values = [row["duration"] for row in timed]
+    ranked = sorted(timed, key=lambda row: row["duration"], reverse=True)
+    by_event = dict((row["event_id"], row) for row in timed)
+    passes = {}
+    for row in timed:
+        top = row
+        while top["parent_event_id"] is not None:
+            parent = by_event.get(top["parent_event_id"])
+            if parent is None:
+                break
+            top = parent
+        bucket = passes.setdefault(
+            top["event_id"],
+            {"event_id": top["event_id"], "name": top["name"], "count": 0, "total": 0.0},
+        )
+        bucket["count"] += 1
+        bucket["total"] += float(row["duration"])
+    return {
+        "supported": True,
+        "timing_counter": info,
+        "unit": info.get("unit"),
+        "offset": offset,
+        "limit": limit,
+        "max_depth": max_depth,
+        "action_count": len(timed),
+        "matched_count": len(rows),
+        "truncated": len(rows) > offset + limit,
+        "actions": rows[offset : offset + limit],
+        "slowest": ranked[:slowest_limit],
+        "passes": sorted(passes.values(), key=lambda item: item["total"], reverse=True),
+        "totals": {
+            "unit": info.get("unit"),
+            "total": float(sum(values)) if values else 0.0,
+            "mean": float(sum(values) / len(values)) if values else 0.0,
+            "min": float(min(values)) if values else 0.0,
+            "max": float(max(values)) if values else 0.0,
+        },
+    }
+
+
+def _draw_actions(controller, rd, params, max_draws):
+    """Collect the draw events an overdraw analysis should rasterise.
+
+    Draws are the only events that shade pixels, so dispatches, clears, copies,
+    and bare marker regions are left out. A draw is recognised by its decoded
+    ``Drawcall`` flag, falling back to a non-zero index count for RenderDoc
+    builds that do not advertise the flag enum.
+    """
+    first_event = params.get("first_event_id")
+    last_event = params.get("last_event_id")
+    first_event = None if first_event is None else _int(first_event)
+    last_event = None if last_event is None else _int(last_event)
+    wanted = set(_int(item) for item in (params.get("event_ids") or []))
+    selected = []
+    candidates = [0]
+
+    def visit(summary):
+        event_id = summary["event_id"]
+        if wanted and event_id not in wanted:
+            return
+        if first_event is not None and event_id < first_event:
+            return
+        if last_event is not None and event_id > last_event:
+            return
+        if "Drawcall" not in summary["flag_names"] and _int(summary["num_indices"]) <= 0:
+            return
+        candidates[0] += 1
+        if len(selected) < max_draws:
+            selected.append(summary)
+
+    _walk_actions(controller, rd, controller.GetRootActions(), 0, 32, None, visit)
+    return selected, candidates[0]
+
+
+def _post_vs_geometry(controller, mesh, max_vertices):
+    """Read one post-VS stage as ``(vertices, indices, note)``.
+
+    RenderDoc reports no index buffer for a non-indexed draw, so the indices are
+    then synthesised from the vertex count instead of collapsing the draw into
+    empty geometry; the synthesised case is reported in ``note``.
+    """
+    vertex_format = getattr(mesh, "format", None)
+    comp_count = _int(getattr(vertex_format, "compCount", 0)) if vertex_format is not None else 0
+    stride = _int(getattr(mesh, "vertexByteStride", 0))
+    if stride <= 0 and comp_count > 0:
+        stride = comp_count * 4
+    if _int(getattr(mesh, "vertexResourceId", 0)) == 0 or stride <= 0:
+        return [], [], "RenderDoc reported no post-VS vertex buffer for this draw"
+    byte_size = _int(getattr(mesh, "vertexByteSize", 0))
+    if byte_size <= 0:
+        byte_size = stride * max_vertices
+    raw = bytes(
+        controller.GetBufferData(
+            mesh.vertexResourceId, _int(getattr(mesh, "vertexByteOffset", 0)), byte_size
+        )
+        or b""
+    )
+    vertices = _decode_vertices(raw, stride, comp_count, max_vertices)
+    indices, note = _mesh_indices(controller, mesh)
+    if not indices:
+        count = min(len(vertices), _int(getattr(mesh, "numIndices", 0)))
+        if count > 0:
+            indices = list(range(count))
+            note = note or "RenderDoc reported no index buffer; synthesised sequential indices"
+    return vertices[:max_vertices], indices, note
+
+
+def _triangle_screen_coords(vertices, indices, width, height, depth_scale, depth_bias):
+    """Project post-VS vertices to pixel coordinates, one triple per triangle.
+
+    Post-VS data is clip space, so each vertex is perspective-divided by ``w``
+    before it is mapped to the grid. A vertex with a non-positive ``w`` sits
+    behind the eye, so the triangles that reference it are dropped rather than
+    mirrored into the frame as geometry that was never visible.
+    """
+    projected = []
+    for vertex in vertices:
+        if len(vertex) < 2:
+            projected.append(None)
+            continue
+        w = vertex[3] if len(vertex) > 3 else 1.0
+        if w <= 0:
+            projected.append(None)
+            continue
+        projected.append(
+            (
+                (vertex[0] / w * 0.5 + 0.5) * width,
+                (1.0 - (vertex[1] / w * 0.5 + 0.5)) * height,
+                ((vertex[2] / w) if len(vertex) > 2 else 0.0) * depth_scale + depth_bias,
+            )
+        )
+    triangles = []
+    for start in range(0, len(indices) - len(indices) % 3, 3):
+        triple = []
+        for index in indices[start : start + 3]:
+            if index < 0 or index >= len(projected) or projected[index] is None:
+                triple = None
+                break
+            triple.append(projected[index])
+        if triple is not None:
+            triangles.append(triple)
+    return triangles
+
+
+def _owns_edge(dx, dy):
+    """Top-left fill rule, expressed on the directed edge itself.
+
+    Two triangles that share an edge traverse it in opposite directions, and this
+    predicate is true for exactly one of ``d`` and ``-d``, so a pixel centre
+    landing exactly on a shared edge is counted by one triangle and not both.
+    That is what keeps the seam between a quad's two triangles out of the
+    overdraw count: without it a single fullscreen quad reports as two layers.
+    """
+    if dy != 0:
+        return dy < 0
+    return dx > 0
+
+
+def _rasterize_triangles(
+    triangles, width, height, scratch, coverage, depth, depth_test, budget, stats
+):
+    """Count how many times each pixel is shaded, and return the samples spent.
+
+    A CPU rasteriser is used because RenderDoc's own quad-overdraw overlay is a
+    GPU pass driven through a ``ReplayOutput``, which needs a window and so
+    cannot run headless. This runs wherever post-VS data is available, at the
+    cost of being an estimate: it counts triangle coverage, not the quad
+    rasterisation a real GPU performs, and it shades both windings because the
+    draw's cull mode is not consulted.
+    """
+    samples = 0
+    for triangle in triangles:
+        if samples >= budget:
+            break
+        (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = triangle
+        area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+        if area == 0:
+            continue
+        low_x = max(0, int(min(x0, x1, x2)))
+        high_x = min(width - 1, int(max(x0, x1, x2)))
+        low_y = max(0, int(min(y0, y1, y2)))
+        high_y = min(height - 1, int(max(y0, y1, y2)))
+        if low_x > high_x or low_y > high_y:
+            continue
+        # Barycentric edge functions are linear in the pixel centre, so the scan
+        # walks them incrementally instead of recomputing three cross products
+        # per pixel. Each eN is the signed area of the sub-triangle opposite
+        # vertex N, so e0+e1+e2 is the triangle's signed area and eN/area is the
+        # barycentric weight of vertex N — which is also how depth is
+        # interpolated.
+        dx0, dx1, dx2 = (y1 - y2), (y2 - y0), (y0 - y1)
+        dy0, dy1, dy2 = (x2 - x1), (x0 - x2), (x1 - x0)
+        start_x = low_x + 0.5
+        start_y = low_y + 0.5
+        row_e0 = (x2 - x1) * (start_y - y1) - (y2 - y1) * (start_x - x1)
+        row_e1 = (x0 - x2) * (start_y - y2) - (y0 - y2) * (start_x - x2)
+        row_e2 = (x1 - x0) * (start_y - y0) - (y1 - y0) * (start_x - x0)
+        own0 = _owns_edge(x2 - x1, y2 - y1)
+        own1 = _owns_edge(x0 - x2, y0 - y2)
+        own2 = _owns_edge(x1 - x0, y1 - y0)
+        span = high_x - low_x + 1
+        for pixel_y in range(low_y, high_y + 1):
+            e0, e1, e2 = row_e0, row_e1, row_e2
+            row = pixel_y * width
+            for pixel_x in range(low_x, high_x + 1):
+                if (e0 > 0 and e1 > 0 and e2 > 0) or (e0 < 0 and e1 < 0 and e2 < 0):
+                    hit = True
+                elif (e0 >= 0 and e1 >= 0 and e2 >= 0) or (e0 <= 0 and e1 <= 0 and e2 <= 0):
+                    # On the boundary, so the fill rule decides the pixel.
+                    hit = (e0 != 0 or own0) and (e1 != 0 or own1) and (e2 != 0 or own2)
+                else:
+                    hit = False
+                if hit:
+                    index = row + pixel_x
+                    if depth_test:
+                        z = (e0 * z0 + e1 * z1 + e2 * z2) / area
+                        if z > depth[index]:
+                            hit = False
+                        else:
+                            depth[index] = z
+                    if hit:
+                        if scratch[index] == 0:
+                            stats[0] += 1
+                        scratch[index] += 1
+                        coverage[index] += 1
+                        stats[1] += 1
+                e0 += dx0
+                e1 += dx1
+                e2 += dx2
+            row_e0 += dy0
+            row_e1 += dy1
+            row_e2 += dy2
+            samples += span
+            if samples >= budget:
+                break
+    return samples
+
+
+def _overdraw_heatmap(coverage, maximum):
+    """Colour one overdraw count per pixel on a blue-green-red ramp."""
+    pixels = bytearray(len(coverage) * 3)
+    span = float(maximum - 1) if maximum > 1 else 1.0
+    for index, count in enumerate(coverage):
+        if count <= 0:
+            continue
+        ratio = (count - 1) / span
+        if ratio < 0.0:
+            ratio = 0.0
+        elif ratio > 1.0:
+            ratio = 1.0
+        band = 2.0 * ratio
+        red = int(255 * max(0.0, band - 1.0))
+        green = int(255 * (1.0 - abs(band - 1.0)))
+        blue = int(255 * max(0.0, 1.0 - band))
+        base = index * 3
+        pixels[base] = red
+        pixels[base + 1] = green
+        pixels[base + 2] = blue
+    return pixels
+
+
+def _png_chunk(tag, payload):
+    body = tag + payload
+    return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def _write_png(path, width, height, pixels):
+    """Write an RGB PNG using only ``zlib``, so the bridge needs no encoder."""
+    stride = width * 3
+    raw = bytearray()
+    for row in range(height):
+        raw.append(0)
+        start = row * stride
+        raw.extend(pixels[start : start + stride])
+    with open(path, "wb") as stream:
+        stream.write(b"\x89PNG\r\n\x1a\n")
+        stream.write(_png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        stream.write(_png_chunk(b"IDAT", zlib.compress(bytes(raw), 6)))
+        stream.write(_png_chunk(b"IEND", b""))
+
+
+def _write_ppm(path, width, height, pixels):
+    """Write a binary PPM, the dependency-free fallback to a PNG heatmap."""
+    with open(path, "wb") as stream:
+        stream.write("P6\n{} {}\n255\n".format(width, height).encode("ascii"))
+        stream.write(bytes(pixels))
+
+
+def _depth_range(controller):
+    """Map clip-space z onto [0, 1] for the API this capture was taken on.
+
+    Direct3D clips depth to [0, 1] while OpenGL and Vulkan clip it to [-1, 1],
+    so a depth test that assumed one range would reject almost everything on the
+    other. The factor is derived from the capture's own API properties.
+    """
+    try:
+        pipeline = _text(controller.GetAPIProperties().pipelineType).casefold()
+    except BaseException:
+        return 1.0, 0.0
+    if "opengl" in pipeline or "vulkan" in pipeline:
+        return 0.5, 0.5
+    return 1.0, 0.0
+
+
+def _op_get_overdraw(controller, rd, params, context):
+    """Quantify overdraw by rasterising each draw's post-VS geometry on the CPU.
+
+    RenderDoc's quad-overdraw overlay is a GPU pass driven through a
+    ``ReplayOutput``, which needs a window and so cannot run headless. This
+    estimates the same quantity -- how many times the frame shades each pixel --
+    from the post-VS triangles a replay can already return, and reports it as
+    per-draw and per-frame statistics with an optional heatmap export.
+    """
+    del context
+    if not _replay_capabilities(controller).get("post_vs_data"):
+        raise RuntimeError("this capture's replay does not support post-VS data")
+    stage = getattr(rd.MeshDataStage, "VSOut", None)
+    if stage is None:
+        raise RuntimeError("this RenderDoc build does not expose post-VS data stages")
+    width = _clamp(params.get("width"), 8, 2048, _OVERDRAW_DEFAULT_WIDTH)
+    height = _clamp(params.get("height"), 8, 2048, _OVERDRAW_DEFAULT_HEIGHT)
+    max_draws = _clamp(params.get("max_draws"), 1, MAX_OVERDRAW_DRAWS, 64)
+    max_triangles = _clamp(params.get("max_triangles"), 1, MAX_OVERDRAW_TRIANGLES, 5000)
+    depth_test = bool(params.get("depth_test", False))
+    output_file = _text(params.get("output_file", "") or "")
+    export_format = None
+    if output_file:
+        export_format = _OVERDRAW_EXPORT_FORMATS.get(os.path.splitext(output_file)[1].casefold())
+        if export_format is None:
+            raise ValueError(
+                "output_file must use one of these extensions: "
+                + ", ".join(sorted(_OVERDRAW_EXPORT_FORMATS))
+            )
+        directory = os.path.dirname(os.path.abspath(output_file))
+        if not os.path.isdir(directory):
+            raise ValueError("output directory does not exist: {}".format(directory))
+    pixel_count = width * height
+    draws, candidates = _draw_actions(controller, rd, params, max_draws)
+    depth_scale, depth_bias = _depth_range(controller)
+    coverage = [0] * pixel_count
+    depth = [1.0] * pixel_count if depth_test else None
+    zeros = [0] * pixel_count
+    scratch = [0] * pixel_count
+    max_vertices = min(MAX_OVERDRAW_VERTICES, max_triangles * 3 + 2)
+    per_draw = []
+    unavailable = []
+    notes = []
+    fragment_total = 0
+    triangle_total = 0
+    budget_left = MAX_OVERDRAW_SAMPLES
+    for summary in draws:
+        if budget_left <= 0:
+            break
+        event_id = summary["event_id"]
+        controller.SetFrameEvent(event_id, True)
+        mesh = controller.GetPostVSData(0, 0, stage)
+        vertices, indices, note = _post_vs_geometry(controller, mesh, max_vertices)
+        if note and note not in notes:
+            notes.append(note)
+        if not vertices or len(indices) < 3:
+            unavailable.append(
+                {
+                    "event_id": event_id,
+                    "name": summary["name"],
+                    "reason": note or "RenderDoc returned no post-VS geometry for this draw",
+                }
+            )
+            continue
+        triangles = _triangle_screen_coords(
+            vertices, indices, width, height, depth_scale, depth_bias
+        )[:max_triangles]
+        if not triangles:
+            unavailable.append(
+                {
+                    "event_id": event_id,
+                    "name": summary["name"],
+                    "reason": "no post-VS triangle projected inside the grid",
+                }
+            )
+            continue
+        scratch[:] = zeros
+        stats = [0, 0]
+        spent = _rasterize_triangles(
+            triangles, width, height, scratch, coverage, depth, depth_test, budget_left, stats
+        )
+        budget_left -= spent
+        covered, counted = stats[0], stats[1]
+        fragment_total += counted
+        triangle_total += len(triangles)
+        per_draw.append(
+            {
+                "event_id": event_id,
+                "name": summary["name"],
+                "triangle_count": len(triangles),
+                "fragment_count": counted,
+                "covered_pixels": covered,
+                "average_overdraw": (float(counted) / covered) if covered else 0.0,
+            }
+        )
+    covered_total = 0
+    maximum = 0
+    for count in coverage:
+        if count > 0:
+            covered_total += 1
+            if count > maximum:
+                maximum = count
+    result = {
+        "method": _OVERDRAW_METHOD,
+        "width": width,
+        "height": height,
+        "depth_test": depth_test,
+        "max_draws": max_draws,
+        "max_triangles": max_triangles,
+        "draw_count": len(per_draw),
+        "candidate_count": candidates,
+        "truncated": candidates > len(per_draw) or budget_left <= 0,
+        "sample_budget_exhausted": budget_left <= 0,
+        "triangle_count": triangle_total,
+        "fragment_count": fragment_total,
+        "covered_pixels": covered_total,
+        "fill_ratio": (float(covered_total) / pixel_count) if pixel_count else 0.0,
+        "average_overdraw": (float(fragment_total) / covered_total) if covered_total else 0.0,
+        "max_overdraw": maximum,
+        "draws": per_draw,
+        "unavailable_draws": unavailable,
+        "geometry_notes": notes,
+        "output_file": output_file or None,
+        "output_format": export_format,
+        "size_bytes": None,
+    }
+    if output_file:
+        pixels = _overdraw_heatmap(coverage, maximum)
+        if export_format == "png":
+            _write_png(output_file, width, height, pixels)
+        else:
+            _write_ppm(output_file, width, height, pixels)
+        if not os.path.isfile(output_file):
+            raise RuntimeError("RenderDoc did not create {}".format(output_file))
+        result["size_bytes"] = int(os.path.getsize(output_file))
+    return result
 
 
 def _op_run_python_script(controller, rd, params, context):
@@ -1479,6 +2175,9 @@ OPERATIONS = {
     "debug_thread": _op_debug_thread,
     "get_counters": _op_get_counters,
     "get_debug_messages": _op_get_debug_messages,
+    "describe_perf": _op_describe_perf,
+    "get_action_timing": _op_get_action_timing,
+    "get_overdraw": _op_get_overdraw,
     "run_python_script": _op_run_python_script,
 }
 
