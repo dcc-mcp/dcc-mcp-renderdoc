@@ -1,0 +1,148 @@
+tools:
+  - name: perf_capabilities
+    description: Report whether the renderdoc.pyd deep replay backend is reachable, and — when given capture_file — the per-capture facts only a replay can answer (counters, timing, post_vs_data) plus a per-tool verdict for list_counters, fetch_counters, get_action_timing, get_debug_messages, and analyze_overdraw. Use before any other tool in this skill so a missing backend or a driver without a timing counter is discovered deliberately rather than through a failure. Not for one capture's size or action counts — use renderdoc_inspect__describe_capture.
+    input_schema:
+      type: object
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: sync
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/perf_capabilities.py
+    next-tools:
+      on-success: [renderdoc_perf__list_counters, renderdoc_perf__get_action_timing]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: list_counters
+    description: Enumerate the GPU counters this capture's driver exposes, returning each counter's id, name, category, description, unit, and result type. Catalogues are driver- and API-specific, so this is the source of the ids fetch_counters and get_action_timing take; name_filter and category_filter narrow the list without a full replay round trip. Supports limit paging. Use before sampling any counter. Not for the sampled values themselves — use renderdoc_perf__fetch_counters.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        name_filter: {type: string, maxLength: 200}
+        category_filter: {type: string, maxLength: 200}
+        limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/list_counters.py
+    next-tools:
+      on-success: [renderdoc_perf__fetch_counters, renderdoc_perf__get_action_timing]
+      on-failure: [renderdoc_perf__perf_capabilities, dcc_diagnostics__audit_log]
+  - name: fetch_counters
+    description: Sample GPU counters over one event range of one capture, returning per counter and event the counter id, event id, and the value read through the counter's own result type as a single number. counter_ids selects which counters to sample and defaults to every counter the driver exposes; first_event_id and last_event_id bound the range so one draw can be profiled without taking the whole frame. Requesting an id this capture does not expose is reported by name instead of returning an empty sample set. Use after list_counters, because counter ids are not portable between machines or drivers. Not for per-action durations — use renderdoc_perf__get_action_timing.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        counter_ids:
+          type: array
+          items: {type: integer, minimum: 0}
+          maxItems: 256
+        first_event_id: {type: integer, minimum: 1}
+        last_event_id: {type: integer, minimum: 1}
+        limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/fetch_counters.py
+    next-tools:
+      on-success: [renderdoc_perf__get_action_timing, renderdoc_inspect__get_action]
+      on-failure: [renderdoc_perf__list_counters, dcc_diagnostics__audit_log]
+  - name: get_action_timing
+    description: Report per-action GPU duration by joining the capture's timing counter onto the action tree — per action its event id, action id, parent event id, name, and duration, plus the slowest actions, per-pass totals, and aggregate min, mean, max, and total in the counter's own unit. name_filter, flag_filter, and max_depth narrow the walk; offset and limit page the actions; slowest bounds the ranked list. RenderDoc stores no duration on an action, so when this driver exposes no timing counter the result says so explicitly and lists the counters that are available instead of reporting an empty frame. counter_id pins the timing counter when a driver exposes more than one candidate. Not for raw counter samples — use renderdoc_perf__fetch_counters.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        counter_id: {type: integer, minimum: 0}
+        name_filter: {type: string, maxLength: 200}
+        flag_filter: {type: string, maxLength: 200}
+        max_depth: {type: integer, minimum: 0, maximum: 32, default: 32}
+        offset: {type: integer, minimum: 0, maximum: 10000000, default: 0}
+        limit: {type: integer, minimum: 1, maximum: 20000, default: 200}
+        slowest: {type: integer, minimum: 0, maximum: 500, default: 20}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/get_action_timing.py
+    next-tools:
+      on-success: [renderdoc_inspect__get_action, renderdoc_perf__analyze_overdraw]
+      on-failure: [renderdoc_perf__list_counters, dcc_diagnostics__audit_log]
+  - name: get_debug_messages
+    description: Report the debug, warning, and error messages a replay produced, with each message's event id, category, severity, source, message id, and description. RenderDoc accumulates these as the replay progresses, so event_id replays up to that event first and reports only what the frame had produced by then. severity_filter and category_filter match against the decoded enum names, and offset and limit page the result. Use to find API misuse and performance warnings a driver raised during replay. Not for per-action cost — use renderdoc_perf__get_action_timing.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        event_id: {type: integer, minimum: 1}
+        severity_filter: {type: string, maxLength: 64}
+        category_filter: {type: string, maxLength: 64}
+        offset: {type: integer, minimum: 0, maximum: 10000000, default: 0}
+        limit: {type: integer, minimum: 1, maximum: 5000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/get_debug_messages.py
+    next-tools:
+      on-success: [renderdoc_inspect__get_action, renderdoc_perf__get_action_timing]
+      on-failure: [renderdoc_perf__perf_capabilities, dcc_diagnostics__audit_log]
+  - name: analyze_overdraw
+    description: Quantify overdraw by projecting each draw's post-VS triangles onto a pixel grid and counting coverage — returning per draw its event id, name, triangle count, fragment count, covered pixels, and average overdraw, plus frame-wide average and max overdraw, fill ratio, and a per-draw breakdown. output_file writes a heatmap, .png or .ppm, colouring each pixel by how many times it was shaded. Requires a capture whose replay supports post-VS data. This is a CPU estimate, not RenderDoc's GPU quad-overdraw overlay, which needs a window and cannot run headless: it counts triangle coverage rather than GPU quads and shades both windings, and depth_test adds only an approximate depth-only pass. The default 256x144 grid is deliberately smaller than the capture viewport because a CPU rasteriser costs one pass per covered triangle; raise width and height for a finer estimate. Not for per-action duration — use renderdoc_perf__get_action_timing.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        output_file: {type: string, minLength: 1, maxLength: 1000}
+        width: {type: integer, minimum: 8, maximum: 2048, default: 256}
+        height: {type: integer, minimum: 8, maximum: 2048, default: 144}
+        depth_test: {type: boolean, default: false}
+        first_event_id: {type: integer, minimum: 1}
+        last_event_id: {type: integer, minimum: 1}
+        event_ids:
+          type: array
+          items: {type: integer, minimum: 1}
+          maxItems: 512
+        max_draws: {type: integer, minimum: 1, maximum: 512, default: 64}
+        max_triangles: {type: integer, minimum: 1, maximum: 200000, default: 5000}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: false
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/analyze_overdraw.py
+    next-tools:
+      on-success: [renderdoc_perf__get_action_timing, renderdoc_inspect__get_pipeline_state]
+      on-failure: [renderdoc_perf__perf_capabilities, dcc_diagnostics__audit_log]

@@ -50,8 +50,25 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "export_mesh",
         "get_mesh_data",
     ),
-    "perf": ("get_counters", "get_debug_messages"),
+    "perf": (
+        "describe_perf",
+        "get_counters",
+        "get_debug_messages",
+        "get_action_timing",
+        "get_overdraw",
+    ),
     "ext": ("run_python_script",),
+}
+
+#: Feature-level capability flags, reported alongside the coarse groups above.
+#: Every feature is gated on the same deep backend, but the finer keys let an
+#: agent ask "can I read counters here?" instead of "is the perf group up?" —
+#: which is the question a caller actually has before it pays for a replay.
+FEATURE_GROUPS: Dict[str, tuple] = {
+    "counters": ("get_counters",),
+    "messages": ("get_debug_messages",),
+    "timing": ("get_action_timing",),
+    "overdraw": ("get_overdraw",),
 }
 
 #: The renderdoc-debug skill tools and the deep replay operation each drives.
@@ -75,6 +92,30 @@ DEBUG_FLAGS: Dict[str, Optional[str]] = {
     "debug_vertex": "shader_debugging",
     "debug_thread": "shader_debugging",
     "export_mesh": "post_vs_data",
+}
+
+#: The renderdoc-perf skill tools and the deep replay operation each drives.
+#: ``list_counters`` and ``fetch_counters`` share one operation: the catalogue
+#: and its samples are the same query, taken with and without ``fetch``.
+PERF_TOOLS: Dict[str, str] = {
+    "list_counters": "get_counters",
+    "fetch_counters": "get_counters",
+    "get_action_timing": "get_action_timing",
+    "get_debug_messages": "get_debug_messages",
+    "analyze_overdraw": "get_overdraw",
+}
+
+#: Per-capture flag each perf tool needs on top of the deep backend. ``None``
+#: means the backend alone is enough for that tool.
+PERF_FLAGS: Dict[str, Optional[str]] = {
+    # Listing counters is answered by the driver's catalogue, which exists even
+    # when it is empty; sampling one is not, so only fetching needs the flag.
+    "list_counters": None,
+    "fetch_counters": "counters",
+    "get_action_timing": "timing",
+    # Debug messages come from the replay itself, not from a counter or a mesh.
+    "get_debug_messages": None,
+    "analyze_overdraw": "post_vs_data",
 }
 
 ENABLE_HINT = (
@@ -125,6 +166,7 @@ def probe(command: Optional[str] = None) -> Dict[str, Any]:
 
     deep_available = deep_host is not None
     capabilities = {group: deep_available for group in CAPABILITY_GROUPS}
+    capabilities.update({feature: deep_available for feature in FEATURE_GROUPS})
     return {
         "baseline": {
             "backend": BASELINE_BACKEND,

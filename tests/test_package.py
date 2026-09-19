@@ -64,6 +64,7 @@ def test_bundled_skills_and_release_workflow_exist():
         "renderdoc-capture",
         "renderdoc-debug",
         "renderdoc-inspect",
+        "renderdoc-perf",
     }
     assert (root / ".github" / "workflows" / "release.yml").is_file()
 
