@@ -9,6 +9,23 @@ from pathlib import Path
 
 from dcc_mcp_renderdoc import __version__
 
+SKILLS_ROOT = Path(__file__).parents[1] / "src" / "dcc_mcp_renderdoc" / "skills"
+
+
+def load_skill_manifest(skill_dir):
+    """Parse a bundled skill's tools.yaml.
+
+    Importing ``yaml`` is a hard requirement rather than an ``importorskip``:
+    a skipped manifest guard is no guard at all, and a plain-scalar colon is
+    invisible to regex-based checks and to ``dcc_mcp_core.validate_skill``.
+    """
+    import yaml
+
+    manifest = yaml.safe_load((skill_dir / "tools.yaml").read_text(encoding="utf-8"))
+    assert isinstance(manifest, dict), skill_dir
+    assert isinstance(manifest.get("tools"), list), skill_dir
+    return manifest
+
 
 def _windows_process_pids(image_name: str) -> set[int]:
     if sys.platform != "win32":
@@ -150,3 +167,19 @@ def test_start_server_defers_port_resolution_to_core(monkeypatch):
     server_module.stop_server()
 
     assert ports == [0, None]
+
+
+def test_every_bundled_skill_manifest_parses():
+    """A tools.yaml that cannot be parsed ships as an unloadable skill.
+
+    Nothing else in CI reads these manifests: ``tools/lint_skills.py`` calls
+    ``dcc_mcp_core.validate_skill``, which does not parse tools.yaml, so a
+    plain scalar containing ": " reaches main with a green build.
+    """
+    skills = sorted(path for path in SKILLS_ROOT.iterdir() if (path / "tools.yaml").is_file())
+    assert len(skills) == 5, [path.name for path in skills]
+    for skill in skills:
+        manifest = load_skill_manifest(skill)
+        for tool in manifest["tools"]:
+            assert tool["name"], skill.name
+            assert tool["description"], skill.name
