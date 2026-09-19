@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.5.1...v0.6.0) (2026-09-19)
+
+
+### Features
+
+* add renderdoc-debug domain for pixel and shader debugging ([b71729c](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b71729ced330c402a66fa8f7f6289f46cf62a854))
+* add renderdoc-inspect domain with replay backend capability gating ([dbe8762](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dbe87629aa184bac3a3657d2f7f5d89ef8ce644a))
+
+
+### Bug Fixes
+
+* bind descendant identity before root-first probe exit ([6cec307](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/6cec307e08b8a07f31114c3eac8e0304fe0fc44f))
+
 ## [0.5.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.5.0...v0.5.1) (2026-08-25)
 
 
