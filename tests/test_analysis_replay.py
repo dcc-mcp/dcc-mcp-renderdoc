@@ -415,6 +415,39 @@ def test_analyze_render_passes_filters_by_name(monkeypatch, tmp_path):
     assert result["name_filter"] == "draw"
 
 
+def test_pass_names_come_from_the_structured_file_before_custom_name(monkeypatch, tmp_path):
+    """A pass named only in the structured file must still be named and matchable.
+
+    RenderDoc markers often carry no ``customName``; their readable name is
+    resolved through ``GetName(structured)``. Reading only ``customName`` made
+    the same event report different names in different tools, and made
+    ``name_filter`` silently drop passes.
+    """
+
+    def named(root):
+        for action in root:
+            action.customName = ""
+            action.GetName = lambda _structured, label=action.GetName(None): label
+            named(getattr(action, "children", []) or [])
+        return root
+
+    controller = AnalysisController(actions=named(AnalysisController().actions))
+    overview = _run(monkeypatch, tmp_path, "get_frame_overview", {}, controller)
+    assert [entry["name"] for entry in overview["passes"]] == ["Frame", "Draw C"]
+
+    passes = _run(monkeypatch, tmp_path, "analyze_render_passes", {}, controller)
+    assert [entry["name"] for entry in passes["passes"]] == ["Frame", "Draw C"]
+    # The filter runs on the resolved name, not on the empty customName.
+    filtered = _run(
+        monkeypatch,
+        tmp_path,
+        "analyze_render_passes",
+        {"name_filter": "draw c"},
+        controller,
+    )
+    assert [entry["event_id"] for entry in filtered["passes"]] == [4]
+
+
 # --------------------------------------------------------------------------- #
 # analyze_state_changes
 # --------------------------------------------------------------------------- #
