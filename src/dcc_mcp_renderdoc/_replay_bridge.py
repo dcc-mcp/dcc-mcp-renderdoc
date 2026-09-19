@@ -1682,6 +1682,11 @@ def _op_get_frame_overview(controller, rd, params, context):
     max_messages = _clamp(params.get("max_messages"), 0, MAX_ITEMS, 8)
     described = _op_describe_capture(controller, rd, {}, context)
     roots = controller.GetRootActions()
+    structured = None
+    try:
+        structured = controller.GetStructuredFile()
+    except BaseException:
+        structured = None
     totals = _new_pass_stats()
     passes = []
     for action in roots:
@@ -1701,10 +1706,14 @@ def _op_get_frame_overview(controller, rd, params, context):
         totals["outputs"].update(stats["outputs"])
         totals["depth_outputs"].update(stats["depth_outputs"])
         if len(passes) < max_passes:
-            name = _text(getattr(action, "customName", ""))
+            name = ""
+            try:
+                name = str(action.GetName(structured)) if structured is not None else ""
+            except BaseException:
+                name = ""
             entry = {
                 "event_id": _int(getattr(action, "eventId", 0)),
-                "name": name,
+                "name": name or _text(getattr(action, "customName", "")),
             }
             entry.update(_finish_pass_stats(stats))
             passes.append(entry)
@@ -1940,6 +1949,11 @@ def _op_analyze_render_passes(controller, rd, params, context):
             if depth + 1 <= max_depth:
                 collect(getattr(action, "children", []) or [], depth + 1)
 
+    structured = None
+    try:
+        structured = controller.GetStructuredFile()
+    except BaseException:
+        structured = None
     collect(roots, 0)
     # Totals come from the root subtrees, so a nested pass is counted once no
     # matter which level the caller asks for.
@@ -1964,7 +1978,14 @@ def _op_analyze_render_passes(controller, rd, params, context):
     for action, depth in nodes:
         if depth != pass_depth:
             continue
-        name = _text(getattr(action, "customName", ""))
+        name = ""
+        try:
+            name = str(action.GetName(structured)) if structured is not None else ""
+        except BaseException:
+            name = ""
+        # The filter runs on the resolved name: a pass whose name only exists
+        # in the structured file must still be matchable.
+        name = name or _text(getattr(action, "customName", ""))
         if name_filter and name_filter not in name.casefold():
             continue
         stats = _new_pass_stats()
