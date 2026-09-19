@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.7.0...v0.8.0) (2026-09-19)
+
+
+### Features
+
+* add four renderdoc-analysis diagnostic tools ([c43a0c7](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/c43a0c72e0951efe2d3b9cd9d56fd0b153b4b732))
+* add render pass structure, state change, and pass timing analysis ([4b1ac65](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/4b1ac65d397414d5d44d97ba734f21d18889be13))
+
+
+### Bug Fixes
+
+* resolve pass names from the structured file before customName ([dac1a18](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dac1a181fae4b861928437371cf508e4a9c789ae))
+* use a folded block scalar for the analyze_overdraw description ([ed237c0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ed237c0c7a6da43da4060c058016f92a561b13f9))
+* use folded block scalars for renderdoc-analysis tool descriptions ([73f2476](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/73f24760efb2fb64a4d0db4a81df12c75ca7d394))
+
 ## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.6.0...v0.7.0) (2026-09-19)
 
 
