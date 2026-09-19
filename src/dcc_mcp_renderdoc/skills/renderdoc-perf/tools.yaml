@@ -116,7 +116,17 @@ tools:
       on-success: [renderdoc_inspect__get_action, renderdoc_perf__get_action_timing]
       on-failure: [renderdoc_perf__perf_capabilities, dcc_diagnostics__audit_log]
   - name: analyze_overdraw
-    description: Quantify overdraw by projecting each draw's post-VS triangles onto a pixel grid and counting coverage — returning per draw its event id, name, triangle count, fragment count, covered pixels, and average overdraw, plus frame-wide average and max overdraw, fill ratio, and a per-draw breakdown. output_file writes a heatmap, .png or .ppm, colouring each pixel by how many times it was shaded. Requires a capture whose replay supports post-VS data. This is a CPU estimate, not RenderDoc's GPU quad-overdraw overlay, which needs a window and cannot run headless: it counts triangle coverage rather than GPU quads and shades both windings, and depth_test adds only an approximate depth-only pass. The default 256x144 grid is deliberately smaller than the capture viewport because a CPU rasteriser costs one pass per covered triangle; raise width and height for a finer estimate. Not for per-action duration — use renderdoc_perf__get_action_timing.
+    description: >-
+      Quantify overdraw by projecting each draw's post-VS triangles onto a pixel grid and counting
+      coverage — returning per draw its event id, name, triangle count, fragment count, covered pixels,
+      and average overdraw, plus frame-wide average and max overdraw, fill ratio, and a per-draw
+      breakdown. output_file writes a heatmap, .png or .ppm, colouring each pixel by how many times it was
+      shaded. Requires a capture whose replay supports post-VS data. This is a CPU estimate, not
+      RenderDoc's GPU quad-overdraw overlay, which needs a window and cannot run headless: it counts
+      triangle coverage rather than GPU quads and shades both windings, and depth_test adds only an
+      approximate depth-only pass. The default 256x144 grid is deliberately smaller than the capture
+      viewport because a CPU rasteriser costs one pass per covered triangle; raise width and height for a
+      finer estimate. Not for per-action duration — use renderdoc_perf__get_action_timing.
     input_schema:
       type: object
       required: [capture_file]
