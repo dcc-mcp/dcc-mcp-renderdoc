@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.6.0...v0.7.0) (2026-09-19)
+
+
+### Features
+
+* add renderdoc-perf domain for GPU counters, timing, and overdraw ([33af7e8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/33af7e877197d5b541652a78a12d57a74eb4be2d))
+
 ## [0.6.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.5.1...v0.6.0) (2026-09-19)
 
 
