@@ -47,6 +47,7 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "analyze_render_passes",
         "analyze_state_changes",
         "read_diff_region",
+        "read_state_fingerprint",
     ),
     "debug": (
         "pick_pixel",

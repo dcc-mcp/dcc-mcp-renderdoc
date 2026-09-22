@@ -431,6 +431,27 @@ def compare_dumps(
         if not os.path.isfile(path):
             raise RenderDocError("texel dump is missing: {}".format(path))
         declared = int(sidecar.get("byte_size") or 0)
+        # A sidecar that contradicts itself is caught here rather than as a
+        # struct.error from a short read: the declared geometry is what sizes
+        # every unpack below, so it has to agree with the declared byte count.
+        geometry = (
+            int(sidecar.get("width") or 0)
+            * int(sidecar.get("height") or 0)
+            * int(sidecar.get("comp_count") or 0)
+            * 4
+        )
+        if geometry != declared:
+            raise RenderDocError(
+                "texel dump {} has a self-contradictory sidecar: {}x{}x{} texel(s) need "
+                "{} byte(s) but it declares {}".format(
+                    path,
+                    sidecar.get("width"),
+                    sidecar.get("height"),
+                    sidecar.get("comp_count"),
+                    geometry,
+                    declared,
+                )
+            )
         actual = os.path.getsize(path)
         if actual != declared:
             raise RenderDocError(
