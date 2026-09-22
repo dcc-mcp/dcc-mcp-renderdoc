@@ -57,6 +57,7 @@ REPLAY_OPERATIONS = (
     "get_draw_call_state",
     "analyze_render_passes",
     "analyze_state_changes",
+    "read_diff_region",
     "get_mesh_data",
     "export_mesh",
     "pick_pixel",

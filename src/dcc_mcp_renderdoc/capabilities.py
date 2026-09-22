@@ -46,6 +46,7 @@ CAPABILITY_GROUPS: Dict[str, tuple] = {
         "get_draw_call_state",
         "analyze_render_passes",
         "analyze_state_changes",
+        "read_diff_region",
     ),
     "debug": (
         "pick_pixel",

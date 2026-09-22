@@ -323,3 +323,107 @@ tools:
       on-success: [renderdoc_perf__get_action_timing, renderdoc_analysis__analyze_render_passes]
       on-failure: [renderdoc_perf__list_counters, dcc_diagnostics__audit_log]
 
+  - name: diff_draws
+    group: verify
+    description: >-
+      Compare one region of one texture or render target between two events of the same capture and report
+      PSNR, mean and max absolute difference, a per-channel breakdown, the share of texels over a
+      threshold, an approximate SSIM, and separate NaN and Inf counts, with an optional difference heatmap
+      export. One replay is reused and moved between the two events, so this is the cheap half of the diff
+      pair. PSNR is reported with its basis - bit depth, channels, and where max_value came from - and two
+      identical regions report identical=true instead of an infinite PSNR. The SSIM here is an
+      approximation over 8x8 blocks with a box window on a sampling grid, reported as ssim_approx with its
+      block size, window, and grid step so it is never mistaken for the standard 11x11 Gaussian SSIM.
+      Requires an uncompressed numeric format; block-compressed, packed, and special formats come back as
+      a structured unsupported result naming the reason. Use for "did this draw change the target?" and as
+      the pixel half of a CI assertion gate. Not for two different captures - use
+      renderdoc_analysis__diff_captures.
+    input_schema:
+      type: object
+      required: [capture_file, event_id_a, event_id_b, resource_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        event_id_a: {type: integer, minimum: 1}
+        event_id_b: {type: integer, minimum: 1}
+        resource_id: {type: integer, minimum: 1}
+        x: {type: integer, minimum: 0, maximum: 65535}
+        y: {type: integer, minimum: 0, maximum: 65535}
+        width: {type: integer, minimum: 1, maximum: 65535}
+        height: {type: integer, minimum: 1, maximum: 65535}
+        mip: {type: integer, minimum: 0, maximum: 64, default: 0}
+        slice_index: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        sample: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        max_texels: {type: integer, minimum: 1024, maximum: 8000000, default: 1000000}
+        channels: {type: array, items: {type: integer, minimum: 0, maximum: 3}, maxItems: 4}
+        max_value: {type: number, exclusiveMinimum: 0}
+        threshold: {type: number, exclusiveMinimum: 0}
+        ssim_grid_step: {type: integer, minimum: 1, maximum: 4096, default: 8}
+        output_file: {type: string, minLength: 1, maxLength: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: false
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/diff_draws.py
+    next-tools:
+      on-success: [renderdoc_analysis__sample_pixel_region, renderdoc_analysis__diagnose_pixel_values]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: diff_captures
+    group: verify
+    description: >-
+      Compare one region of one texture or render target between two captures and report PSNR, mean and
+      max absolute difference, a per-channel breakdown, the share of texels over a threshold, an
+      approximate SSIM, and separate NaN and Inf counts, with an optional difference heatmap export. Each
+      capture is replayed in its own process, because a RenderDoc replay context holds one capture at a
+      time; the texels are handed over through a temporary directory and compared in bounded chunks. The
+      second replay is allowed to fail on its own and is then reported as a one-sided unsupported_capture
+      result, so a capture that will not open is never compared against nothing. match_by picks how the
+      two captures are lined up: event_id for a known id, index for the nth draw, name for the draw with
+      that name. A size, format, or API mismatch returns comparable=false with the reason instead of
+      raising; force compares the region the two sides have in common anyway. PSNR carries its basis -
+      bit depth, channels, and where max_value came from - and two identical regions report identical=true
+      rather than an infinite PSNR. ssim_approx is an approximation over 8x8 blocks with a box window on a
+      sampling grid and is reported with its block size, window, and grid step. Use for regression checks
+      across builds and as the pixel half of a CI assertion gate. Not for two events of one capture - use
+      renderdoc_analysis__diff_draws.
+    input_schema:
+      type: object
+      required: [capture_file, other_capture_file, resource_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        other_capture_file: {type: string, minLength: 1, maxLength: 1000}
+        resource_id: {type: integer, minimum: 1}
+        match_by: {type: string, enum: [event_id, index, name], default: event_id}
+        event_id: {type: integer, minimum: 1}
+        event_index: {type: integer, minimum: 0, maximum: 10000000}
+        event_name: {type: string, minLength: 1, maxLength: 1000}
+        other_resource_id: {type: integer, minimum: 1}
+        x: {type: integer, minimum: 0, maximum: 65535}
+        y: {type: integer, minimum: 0, maximum: 65535}
+        width: {type: integer, minimum: 1, maximum: 65535}
+        height: {type: integer, minimum: 1, maximum: 65535}
+        mip: {type: integer, minimum: 0, maximum: 64, default: 0}
+        slice_index: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        sample: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        max_texels: {type: integer, minimum: 1024, maximum: 8000000, default: 1000000}
+        channels: {type: array, items: {type: integer, minimum: 0, maximum: 3}, maxItems: 4}
+        max_value: {type: number, exclusiveMinimum: 0}
+        threshold: {type: number, exclusiveMinimum: 0}
+        ssim_grid_step: {type: integer, minimum: 1, maximum: 4096, default: 8}
+        output_file: {type: string, minLength: 1, maxLength: 1000}
+        force: {type: boolean, default: false}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: false
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 600
+    source_file: scripts/diff_captures.py
+    next-tools:
+      on-success: [renderdoc_analysis__sample_pixel_region, renderdoc_analysis__diagnose_pixel_values]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
