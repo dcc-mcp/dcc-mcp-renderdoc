@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.10.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.0...v0.10.0) (2026-09-22)
+
+
+### Features
+
+* add assert_pixels and assert_state CI assertion gates ([8783a9b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/8783a9bbb5587078cc04459e606ec3f58001690f))
+* add diff_draws and diff_captures image comparison tools ([a60471a](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a60471a29cdb12c4698534e050204a7f4442c643))
+* add four renderdoc-analysis diagnostic tools ([c43a0c7](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/c43a0c72e0951efe2d3b9cd9d56fd0b153b4b732))
+* add render pass structure, state change, and pass timing analysis ([4b1ac65](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/4b1ac65d397414d5d44d97ba734f21d18889be13))
+* add RenderDoc MCP adapter ([a324344](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a324344d5dcab758282c77598f4591076526f44e))
+* add renderdoc-debug domain for pixel and shader debugging ([b71729c](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b71729ced330c402a66fa8f7f6289f46cf62a854))
+* add renderdoc-inspect domain with replay backend capability gating ([dbe8762](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dbe87629aa184bac3a3657d2f7f5d89ef8ce644a))
+* add renderdoc-perf domain for GPU counters, timing, and overdraw ([33af7e8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/33af7e877197d5b541652a78a12d57a74eb4be2d))
+* auto-download RenderDoc runtime ([e380b95](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e380b95c9cd7f86a031e4634b39740111af507ec))
+* automate interactive frame capture ([3131ed3](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3131ed35a5f252993c7a099a05071e73313126c3))
+* default adapter instances to dynamic ports ([#6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/6)) ([b4bd77b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b4bd77bfc487755fc1aadc390997be638382ada1))
+* export drawcall shader resources ([8ee5f7d](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/8ee5f7d36819010f79a5aef7a0ac345c6a1a2a60))
+
+
+### Bug Fixes
+
+* accept POSIX target ident exit status ([e35d14e](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e35d14ed7dfdd429f5356ac8a5d5a98411a9dc28))
+* allow long-running frame trigger delays ([#10](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/10)) ([3212cf7](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3212cf7c9f236b28b48bf0d28705e2b1939fbe21))
+* bind descendant identity before root-first probe exit ([6cec307](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/6cec307e08b8a07f31114c3eac8e0304fe0fc44f))
+* bind POSIX probe process identities ([3d0ca60](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3d0ca60e168771f53065ec3970ff74dce19f41b2))
+* bind RenderDoc imported module identity ([cc80af9](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/cc80af9c1804ea570d4e7e6ebec412f09b5fc3e1))
+* bind RenderDoc target adapter version ([1d216a2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1d216a23a6895fbb4d7a9ffedb26d71f2c3681e8))
+* bind RenderDoc warm probe status ([e699a22](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e699a2238283e858760edd95cd4ead4344b7b630))
+* capture a supported OpenGL core context ([7817a6f](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/7817a6fd3a7e683a37348ed4a0582bfe456024b6))
+* capture relaunched child processes ([39e5603](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/39e5603112c8cad98807da3fee86248dd03fb824))
+* classify render work by API operation ([f5cf5a6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/f5cf5a69b31cd4066d47d28c6701262d3c3225ac))
+* harden RenderDoc install lifecycle ([46ca9fc](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/46ca9fc0b16deb17149a16621961993af81c85a5))
+* harden RenderDoc lifecycle transactions ([a3b7e75](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a3b7e75f8df45666344de0ecc2fcf71f04bcfd87))
+* harden target control lifecycle ([1a1eca8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1a1eca82fb453ec40b11a33791160d6074e70a6f))
+* include C boolean definitions in smoke target ([a9471ed](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a9471ed7fef6f663a74ed9c9207ae8231bc5dafc))
+* initialize OpenGL before frame capture ([af3c93c](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/af3c93c2b7fc794769187d7e237596d5c37de97b))
+* isolate target control sidecar ([2e16b2b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/2e16b2b009c76136a5ad2889c4943c458401923a))
+* keep capture controller alive through trigger ([#11](https://github.com/dcc-mcp/dcc-mcp-renderdoc/issues/11)) ([1fb7bed](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1fb7bed40dfb027b148a14cefd01c53028891d56))
+* keep capture diagnostics cross-platform ([a477bfd](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a477bfd9f32d609f141d6d77d0576a861fd60bf1))
+* keep RenderDoc runtime cache immutable ([585b9b6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/585b9b6ea45134703cc692a9cd61ca1a51896b55))
+* keep runtime version aligned with package ([b3eb754](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/b3eb754c98416dd1d0b467691949e61bd679cb88))
+* normalize target names across platforms ([44602a0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/44602a0fca3fd2749688f56f169280d18ddcb989))
+* receipt RenderDoc runtime caches ([3a54c72](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/3a54c72172d04e99ded36eb99b76331d8ad9e44a))
+* reject captures without rendering work ([5799193](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/57991932e74c57e2826ffba10cbb3f433e55dca7))
+* report capture target diagnostics ([861c852](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/861c8528b35a13fdd8441a89ede80f967e811839))
+* report managed runtime drift ([e628a72](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/e628a728ece69e6d8dc4219b37498f7b9f674c77))
+* resolve pass names from the structured file before customName ([dac1a18](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dac1a181fae4b861928437371cf508e4a9c789ae))
+* secure RenderDoc install lifecycle ([81102b6](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/81102b62629a47af18c5d0e4c29f1761ab766a76))
+* supervise POSIX probe process groups ([ab2c0de](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ab2c0de10d3b67ccff181835d194aa82cb966b5b))
+* sync 0.3.1 lock metadata ([ccef4cf](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ccef4cf6f1176af8df55578d2dbf148c3968d60b))
+* sync 0.3.2 lock metadata ([f8d68e2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/f8d68e243259752036f923439c76f9f103130093))
+* sync release lock metadata ([9c8d095](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/9c8d0954c1e5650367bd3df58ba6a251047698f2))
+* target explicit RenderDoc frame capture ([99f1568](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/99f1568e0367c156c6c01106109ea4333e0788f5))
+* terminate RenderDoc probe process trees ([dfec46a](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/dfec46a304b2dd8b48a0bf0ee96504447dda8321))
+* trigger a presented frame in RenderDoc smoke ([2d939cb](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/2d939cb3432ff6280ac44e56b6f785d1ff98d2ee))
+* trigger captures through RenderDoc Target Control ([68d93aa](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/68d93aa9c0629b61cac75275ca53a55a65f29729))
+* trigger captures through target control ([f0a11c8](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/f0a11c844a5597c0ae6b022a8ec07c32d7a15806))
+* use a folded block scalar for the analyze_overdraw description ([ed237c0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ed237c0c7a6da43da4060c058016f92a561b13f9))
+* use folded block scalars for renderdoc-analysis tool descriptions ([73f2476](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/73f24760efb2fb64a4d0db4a81df12c75ca7d394))
+* use published Core install contract ([a5f99ca](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a5f99ca707c549e63de3ce48b783ff8b58703368))
+* verify RenderDoc managed provenance ([07906b0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/07906b0f5099f434064dd08fb79274e01573ade8))
+* verify target before capture trigger ([a392e9f](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a392e9fc974152d5d2dc183c1ed8b60ed15c2195))
+
+
+### Documentation
+
+* align agent workflow and branding ([ca8b2cf](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/ca8b2cf955a470a87efde24c12e9ebbdb284633c))
+* document CLI install and updates ([599cc70](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/599cc70445e11c2fc53d2626c24f9912365b87e0))
+
 ## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.8.0...v0.9.0) (2026-09-22)
 
 
