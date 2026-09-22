@@ -105,6 +105,15 @@ MAX_OVERDRAW_SAMPLES = 4000000
 #: numbers are rasterised from post-VS geometry on the CPU instead. Reported in
 #: the payload so an agent never reads them as GPU-measured.
 _OVERDRAW_METHOD = "cpu_rasterised_estimate"
+#: Ceilings for the diff readback op: events one replay may dump, texels one
+#: side may dump, and the byte width the dumps are written with.
+MAX_DIFF_EVENTS = 2
+MAX_DIFF_TEXELS = 8000000
+DEFAULT_DIFF_TEXELS = 1000000
+#: Sidecar schema for the texel dumps the diff tools exchange between replays.
+DIFF_DUMP_SCHEMA_VERSION = 1
+#: How ``diff_captures`` lines an event in one capture up with one in the other.
+_DIFF_MATCH_MODES = ("event_id", "index", "name")
 #: Counter name fragments that carry per-event GPU timing, most specific first.
 #: The duration counter has no stable ID across APIs and drivers, so the choice
 #: is made by name rather than by ordinal.
@@ -3615,6 +3624,241 @@ def _op_get_overdraw(controller, rd, params, context):
     return result
 
 
+def _diff_sample_step(region_texels, max_texels):
+    """Stride that keeps one diff readback inside ``max_texels``.
+
+    Both sides of a diff must land on the same texels, so the stride is derived
+    from the region size and the ceiling alone -- never from anything the two
+    captures disagree about.
+    """
+    if region_texels <= max_texels:
+        return 1
+    step = 1
+    while (region_texels + step * step - 1) // (step * step) > max_texels:
+        step += 1
+    return step
+
+
+def _diff_event_order(controller, rd):
+    """Every draw event in the frame, in replay order.
+
+    The flag enum is authoritative whenever this build advertises it: a bare
+    marker region carries no Drawcall flag but does carry an index count, so
+    falling back to the count while the enum is present would number a
+    pass-scoped node as a draw and shift every index after it. The count is
+    only a fallback for builds that do not expose the enum at all.
+    """
+    has_flags = getattr(rd, "ActionFlags", None) is not None
+    order = []
+
+    def visit(summary):
+        if has_flags:
+            if "Drawcall" not in summary["flag_names"]:
+                return
+        elif _int(summary["num_indices"]) <= 0:
+            return
+        order.append(summary)
+
+    _walk_actions(controller, rd, controller.GetRootActions(), 0, 32, None, visit)
+    return order
+
+
+def _resolve_diff_events(controller, rd, params):
+    """Turn the diff op's event selector into concrete event ids.
+
+    ``event_id`` takes the ids the caller already knows. ``index`` and ``name``
+    exist because two captures of the same scene do not have to agree on event
+    ids: the Nth draw, or the draw with a given name, is the portable way to
+    name the same point in two different frames.
+    """
+    match_by = _text(params.get("match_by") or "event_id")
+    if match_by not in _DIFF_MATCH_MODES:
+        raise ValueError("match_by must be one of: " + ", ".join(_DIFF_MATCH_MODES))
+    if match_by == "event_id":
+        requested = params.get("event_ids") or []
+        if not isinstance(requested, list) or not requested:
+            raise ValueError("event_ids is required when match_by is 'event_id'")
+        if len(requested) > MAX_DIFF_EVENTS:
+            raise ValueError(
+                "at most {} event(s) can be compared in one call".format(MAX_DIFF_EVENTS)
+            )
+        return [_int(item) for item in requested], match_by
+    order = _diff_event_order(controller, rd)
+    if match_by == "index":
+        index = _int(params.get("event_index"))
+        if index < 0 or index >= len(order):
+            raise ValueError(
+                "event_index {} is out of range: this capture has {} draw(s)".format(
+                    index, len(order)
+                )
+            )
+        return [order[index]["event_id"]], match_by
+    name = _text(params.get("event_name", "") or "")
+    if not name:
+        raise ValueError("event_name is required when match_by is 'name'")
+    for summary in order:
+        if summary["name"] == name:
+            return [summary["event_id"]], match_by
+    raise ValueError("no draw named {!r} in this capture".format(name))
+
+
+def _write_diff_dump(directory, index, floats, sidecar):
+    """Write one side's texels as little-endian float32 plus its sidecar.
+
+    ``struct.pack`` is chunked because unpacking millions of values into one
+    call's argument list is not portable. The sidecar is what the host reads
+    back before it compares anything, so it carries everything the comparison
+    has to hold constant between the two sides.
+    """
+    binary = os.path.join(directory, "dump_{}.bin".format(index))
+    packed = []
+    for start in range(0, len(floats), 4096):
+        chunk = floats[start : start + 4096]
+        packed.append(struct.pack("<{}f".format(len(chunk)), *chunk))
+    with open(binary, "wb") as stream:
+        stream.write(b"".join(packed))
+    sidecar_path = os.path.join(directory, "dump_{}.json".format(index))
+    with open(sidecar_path, "w") as stream:
+        json.dump(sidecar, stream, sort_keys=True)
+    return binary, sidecar_path
+
+
+def _op_read_diff_region(controller, rd, params, context):
+    """Dump the texels a diff needs from one region, once per requested event.
+
+    This is the readback half of ``diff_draws`` and ``diff_captures`` and
+    nothing else: the comparison runs on the host, so no diff maths has to
+    exist in two copies. A capture can only be replayed one at a time inside
+    ``qrenderdoc``, so cross-capture diffs call this once per capture and the
+    host compares what landed on disk; a within-capture diff calls it once and
+    moves the replay with ``SetFrameEvent`` between the two dumps.
+    """
+    del context
+    out_dir = _text(params.get("out_dir", "") or "")
+    if not out_dir:
+        raise ValueError("out_dir is required")
+    if not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    event_ids, match_by = _resolve_diff_events(controller, rd, params)
+    texture = _find_texture(controller, _int(params.get("resource_id")))
+    mip = _clamp(params.get("mip"), 0, 64, 0)
+    slice_index = _clamp(params.get("slice"), 0, 65535, 0)
+    sample_index = _clamp(params.get("sample"), 0, 65535, 0)
+    max_texels = _clamp(params.get("max_texels"), 1024, MAX_DIFF_TEXELS, DEFAULT_DIFF_TEXELS)
+    region = _region_extent(texture, mip, params)
+    facts = _format_facts(rd, texture.format)
+    region.update({"mip": mip, "slice": slice_index, "sample": sample_index})
+    api = ""
+    try:
+        api = _text(controller.GetAPIProperties().pipelineType)
+    except BaseException:
+        api = ""
+    base = {
+        "supported": True,
+        "match_by": match_by,
+        "api": api,
+        "resource_id": _int(getattr(texture, "resourceId", 0)),
+        "resource_name": _text(getattr(texture, "name", "")),
+        "format": facts,
+        "region": region,
+        "max_texels": max_texels,
+        "dumps": [],
+    }
+    if not facts["decodable"]:
+        base.update(
+            {
+                "supported": False,
+                "error_message": "this texture's format cannot be sampled: {}".format(
+                    facts["reason"]
+                ),
+                "hint": "diff a texture with an uncompressed numeric format, or export "
+                "both sides with get_texture_data first",
+            }
+        )
+        return base
+    element = facts["element_byte_size"]
+    comp_count = facts["comp_count"]
+    region_texels = region["width"] * region["height"]
+    step = _diff_sample_step(region_texels, max_texels)
+    rows = list(range(region["y"], region["y"] + region["height"], step))
+    columns = list(range(region["x"], region["x"] + region["width"], step))
+    sampled = step > 1
+    for index, event_id in enumerate(event_ids):
+        _set_event(controller, event_id)
+        raw = _read_region(controller, rd, texture, mip, slice_index, sample_index)
+        expected = region["level_width"] * region["level_height"] * element
+        if len(raw) < expected:
+            base.update(
+                {
+                    "supported": False,
+                    "error_message": "RenderDoc returned {} byte(s) for a {}x{} level of "
+                    "{}-byte texels at event {}".format(
+                        len(raw),
+                        region["level_width"],
+                        region["level_height"],
+                        element,
+                        event_id,
+                    ),
+                    "hint": "try another mip, or export the texture with get_texture_data",
+                    "dumps": [],
+                }
+            )
+            return base
+        floats = []
+        undecodable = 0
+        for sy in rows:
+            row_base = sy * region["level_width"]
+            for sx in columns:
+                values = _decode_texel(raw, (row_base + sx) * element, facts)
+                if values is None:
+                    # Keep the two dumps aligned: an unreadable texel becomes a
+                    # NaN, which the host counts separately instead of folding
+                    # into the difference statistics.
+                    undecodable += 1
+                    floats.extend([float("nan")] * comp_count)
+                else:
+                    floats.extend(values)
+        sidecar = {
+            "schema_version": DIFF_DUMP_SCHEMA_VERSION,
+            "capture_file": _text(os.environ.get("DCC_MCP_RENDERDOC_CAPTURE", "") or ""),
+            "resource_id": base["resource_id"],
+            "resource_name": base["resource_name"],
+            "event_id": event_id,
+            "api": api,
+            "match_by": match_by,
+            "format": facts,
+            "region": region,
+            "width": len(columns),
+            "height": len(rows),
+            "comp_count": comp_count,
+            "texel_count": len(columns) * len(rows),
+            "float_count": len(floats),
+            "byte_size": len(floats) * 4,
+            "sample_step": step,
+            "sampled": sampled,
+            "estimate": sampled,
+            "estimate_method": None
+            if not sampled
+            else "every {}th texel per axis of the {}x{} region, so {} of {} texel(s) "
+            "were read".format(
+                step,
+                region["width"],
+                region["height"],
+                len(floats) // comp_count,
+                region_texels,
+            ),
+            "region_texel_count": region_texels,
+            "undecodable_texel_count": undecodable,
+            "value_kind": "float",
+        }
+        binary, sidecar_path = _write_diff_dump(out_dir, index, floats, sidecar)
+        sidecar["bin_file"] = binary
+        sidecar["sidecar_file"] = sidecar_path
+        sidecar["index"] = index
+        base["dumps"].append(sidecar)
+    return base
+
+
 def _op_run_python_script(controller, rd, params, context):
     source = _text(params.get("source", "") or "")
     if not source.strip():
@@ -3668,6 +3912,7 @@ OPERATIONS = {
     "analyze_render_passes": _op_analyze_render_passes,
     "analyze_state_changes": _op_analyze_state_changes,
     "get_pass_timing": _op_get_pass_timing,
+    "read_diff_region": _op_read_diff_region,
     "get_mesh_data": _op_get_mesh_data,
     "export_mesh": _op_export_mesh,
     "pick_pixel": _op_pick_pixel,
