@@ -556,22 +556,64 @@ def _reference_mean_abs_diff(left, right):
     return total / count
 
 
+def _forced_pair(tmp_path, left_size, right_size):
+    lw, lh = left_size
+    rw, rh = right_size
+    left = _write_dump(tmp_path, "left", _grid(lw, lh), width=lw, height=lh)
+    right = _write_dump(tmp_path, "right", _grid(rw, rh, offset=100), width=rw, height=rh)
+    return left, right
+
+
 @pytest.mark.parametrize(
     "left_size,right_size",
     [((8, 4), (4, 8)), ((4, 8), (8, 4)), ((4, 4), (8, 2)), ((8, 2), (4, 4))],
 )
 def test_forced_comparison_reads_each_side_with_its_own_stride(tmp_path, left_size, right_size):
     """Mismatched geometry must use per-side row strides, not the left one."""
-    lw, lh = left_size
-    rw, rh = right_size
-    left = _write_dump(tmp_path, "left", _grid(lw, lh), width=lw, height=lh)
-    right = _write_dump(tmp_path, "right", _grid(rw, rh, offset=100), width=rw, height=rh)
+    left, right = _forced_pair(tmp_path, left_size, right_size)
     # Both sides are the same size in bytes, so only a per-side read can
     # distinguish them -- a shared stride silently produces a wrong answer.
     assert left["byte_size"] == right["byte_size"]
     metrics = diff.compare_dumps(left, right, ssim_grid_step=8)
     assert metrics["mean_abs_diff"] == pytest.approx(_reference_mean_abs_diff(left, right))
     assert metrics["compared_region"]["cropped"] is True
+
+
+@pytest.mark.parametrize(
+    "left_size,right_size",
+    [((4, 4), (8, 8)), ((8, 8), (4, 4)), ((2, 2), (8, 8)), ((8, 8), (2, 2))],
+)
+def test_forced_comparison_of_dumps_with_different_byte_counts(tmp_path, left_size, right_size):
+    """The discriminating case for per-side sidecar validation.
+
+    Two captures of the same scene at different resolutions is the common real
+    case, and it is the one the old check got wrong: it validated the right
+    dump against the left dump's ``byte_size`` and rejected a pair that was
+    perfectly comparable once cropped. These cases have genuinely different
+    byte counts, so nothing but a per-side read can handle them.
+    """
+    left, right = _forced_pair(tmp_path, left_size, right_size)
+    assert left["byte_size"] != right["byte_size"]
+    metrics = diff.compare_dumps(left, right, ssim_grid_step=8)
+    assert metrics["mean_abs_diff"] == pytest.approx(_reference_mean_abs_diff(left, right))
+    assert metrics["compared_region"]["width"] == min(left["width"], right["width"])
+    assert metrics["compared_region"]["height"] == min(left["height"], right["height"])
+    assert metrics["compared_region"]["cropped"] is True
+
+
+def test_a_self_contradictory_sidecar_is_rejected_before_reading(tmp_path):
+    """A sidecar whose geometry disagrees with its byte size must not unpack."""
+    left = _write_dump(tmp_path, "left", [0.0] * 16, width=2, height=2)
+    right = _write_dump(tmp_path, "right", [0.0] * 16, width=2, height=2)
+    # The file really is 64 bytes, but the sidecar claims a geometry needing
+    # 256. Without this check struct.unpack raises struct.error, which is not
+    # a RenderDocError and so escapes diff_region's handler.
+    (tmp_path / "right.json").write_text(
+        json.dumps(dict(right, width=4, height=4, byte_size=64)), encoding="utf-8"
+    )
+    contradictory = json.loads((tmp_path / "right.json").read_text(encoding="utf-8"))
+    with pytest.raises(replay.RenderDocError, match="self-contradictory sidecar"):
+        diff.compare_dumps(left, contradictory, ssim_grid_step=8)
 
 
 def test_each_side_is_size_checked_against_its_own_sidecar(tmp_path):

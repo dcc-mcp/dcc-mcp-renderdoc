@@ -427,3 +427,105 @@ tools:
     next-tools:
       on-success: [renderdoc_analysis__sample_pixel_region, renderdoc_analysis__diagnose_pixel_values]
       on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: assert_pixels
+    group: verify
+    description: >-
+      Assert that the difference between two draws of one capture, or between two captures, stays
+      inside thresholds you supply, and report the pass/fail verdict with the measured value for
+      every threshold checked. This is the CI gate built on top of diff_draws and diff_captures: it
+      delegates the measurement to them so there is one implementation of the comparison, then turns
+      the numbers into a verdict. At least one of max_mean_abs_diff, min_psnr, or
+      max_failed_pixel_ratio is required, because a gate with no criterion always passes. Two
+      identical regions satisfy any min_psnr, since their PSNR is infinite. When the two sides
+      cannot be compared the result reports evaluable=false rather than passing or failing, so a
+      setup problem never reads as a green build. NaN and Inf texels are excluded from the metrics
+      and reported under non_finite rather than gated on, since they are not one of the thresholds
+      this tool enforces. Use as the pixel half of a CI assertion gate. Not for inspecting the
+      numbers without a verdict - use renderdoc_analysis__diff_draws or
+      renderdoc_analysis__diff_captures.
+    input_schema:
+      type: object
+      required: [capture_file, resource_id]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        resource_id: {type: integer, minimum: 1}
+        max_mean_abs_diff: {type: number, minimum: 0}
+        min_psnr: {type: number, minimum: 0}
+        max_failed_pixel_ratio: {type: number, minimum: 0, maximum: 1}
+        other_capture_file: {type: string, minLength: 1, maxLength: 1000}
+        event_id_a: {type: integer, minimum: 1}
+        event_id_b: {type: integer, minimum: 1}
+        match_by: {type: string, enum: [event_id, index, name], default: event_id}
+        event_id: {type: integer, minimum: 1}
+        event_index: {type: integer, minimum: 0, maximum: 10000000}
+        event_name: {type: string, minLength: 1, maxLength: 1000}
+        other_resource_id: {type: integer, minimum: 1}
+        x: {type: integer, minimum: 0, maximum: 65535}
+        y: {type: integer, minimum: 0, maximum: 65535}
+        width: {type: integer, minimum: 1, maximum: 65535}
+        height: {type: integer, minimum: 1, maximum: 65535}
+        mip: {type: integer, minimum: 0, maximum: 64, default: 0}
+        slice_index: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        sample: {type: integer, minimum: 0, maximum: 65535, default: 0}
+        max_texels: {type: integer, minimum: 1024, maximum: 8000000, default: 1000000}
+        channels: {type: array, items: {type: integer, minimum: 0, maximum: 3}, maxItems: 4}
+        max_value: {type: number, exclusiveMinimum: 0}
+        threshold: {type: number, exclusiveMinimum: 0}
+        ssim_grid_step: {type: integer, minimum: 1, maximum: 4096, default: 8}
+        output_file: {type: string, minLength: 1, maxLength: 1000}
+        force: {type: boolean, default: false}
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: false
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 600
+    source_file: scripts/assert_pixels.py
+    next-tools:
+      on-success: [renderdoc_analysis__diff_draws, renderdoc_analysis__diff_captures]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]
+  - name: assert_state
+    group: verify
+    description: >-
+      Assert that the pipeline state of two events matches, and report every key that differs with
+      its before and after values. Compare two events of one capture in a single replay, or two
+      captures with two replays, because a RenderDoc replay context holds one capture at a time.
+      ignore_keys names the state sections to leave out, which is how a gate tolerates changes it
+      expects, such as a bindless descriptor or a per-frame resource id; keys named there are
+      reported in ignored_keys so an ignored change is never invisible. A key you name that is not
+      in the fingerprint is reported in unknown_ignore_keys rather than silently accepted, since
+      that is usually a typo. The compared fingerprint is the same one analyze_state_changes uses,
+      so a state difference this tool reports is a state switch that tool would have counted. A
+      section one replay exposes and the other does not is reported as a difference with null on
+      the missing side. Use as the state half of a CI assertion gate. Not for which switches across
+      a whole frame were avoidable - use renderdoc_analysis__analyze_state_changes.
+    input_schema:
+      type: object
+      required: [capture_file]
+      properties:
+        capture_file: {type: string, minLength: 1, maxLength: 1000}
+        event_id_a: {type: integer, minimum: 1}
+        event_id_b: {type: integer, minimum: 1}
+        other_capture_file: {type: string, minLength: 1, maxLength: 1000}
+        match_by: {type: string, enum: [event_id, index, name], default: event_id}
+        event_id: {type: integer, minimum: 1}
+        event_index: {type: integer, minimum: 0, maximum: 10000000}
+        event_name: {type: string, minLength: 1, maxLength: 1000}
+        ignore_keys:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 200}
+          maxItems: 64
+      additionalProperties: false
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: async
+    affinity: any
+    timeout_hint_secs: 300
+    source_file: scripts/assert_state.py
+    next-tools:
+      on-success: [renderdoc_inspect__get_pipeline_state, renderdoc_analysis__analyze_state_changes]
+      on-failure: [renderdoc_inspect__replay_capabilities, dcc_diagnostics__audit_log]

@@ -107,6 +107,7 @@ MAX_OVERDRAW_SAMPLES = 4000000
 _OVERDRAW_METHOD = "cpu_rasterised_estimate"
 #: Ceilings for the diff readback op: events one replay may dump, texels one
 #: side may dump, and the byte width the dumps are written with.
+#: Events one comparison may look at, shared by the texel and state readbacks.
 MAX_DIFF_EVENTS = 2
 MAX_DIFF_TEXELS = 8000000
 DEFAULT_DIFF_TEXELS = 1000000
@@ -3859,6 +3860,57 @@ def _op_read_diff_region(controller, rd, params, context):
     return base
 
 
+def _op_read_state_fingerprint(controller, rd, params, context):
+    """Snapshot the pipeline state of one or two events as a comparable dict.
+
+    This is the read half of ``assert_state`` and shares ``read_diff_region``'s
+    event resolution, so the same ``event_id`` / ``index`` / ``name`` selector
+    lines up two captures the same way either tool is called. Unlike the texel
+    dumps there is nothing to stage on disk: a fingerprint is a handful of
+    keys, so it rides back in the status document instead.
+
+    A fingerprint is read defensively per event, so an event whose state this
+    replay cannot read is reported as unavailable with the reason rather than
+    taking the whole comparison down with it.
+    """
+    del context
+    event_ids, match_by = _resolve_diff_events(controller, rd, params)
+    api = ""
+    try:
+        api = _text(controller.GetAPIProperties().pipelineType)
+    except BaseException:
+        api = ""
+    snapshots = []
+    unavailable = []
+    for index, event_id in enumerate(event_ids):
+        try:
+            _set_event(controller, event_id)
+            fingerprint = _state_fingerprint(controller, rd)
+        except BaseException as exc:
+            unavailable.append("event {}: {}: {}".format(event_id, type(exc).__name__, exc))
+            continue
+        snapshots.append(
+            {
+                "index": index,
+                "event_id": event_id,
+                "fingerprint": _describe(fingerprint),
+            }
+        )
+    return {
+        "supported": not unavailable,
+        "match_by": match_by,
+        "api": api,
+        "snapshots": snapshots,
+        "unavailable": unavailable,
+        "error_message": None
+        if not unavailable
+        else "pipeline state could not be read for " + "; ".join(unavailable),
+        "hint": None
+        if not unavailable
+        else "pick events this capture's replay can move to, or compare a different pair",
+    }
+
+
 def _op_run_python_script(controller, rd, params, context):
     source = _text(params.get("source", "") or "")
     if not source.strip():
@@ -3913,6 +3965,7 @@ OPERATIONS = {
     "analyze_state_changes": _op_analyze_state_changes,
     "get_pass_timing": _op_get_pass_timing,
     "read_diff_region": _op_read_diff_region,
+    "read_state_fingerprint": _op_read_state_fingerprint,
     "get_mesh_data": _op_get_mesh_data,
     "export_mesh": _op_export_mesh,
     "pick_pixel": _op_pick_pixel,

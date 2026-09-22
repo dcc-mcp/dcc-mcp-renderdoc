@@ -7,9 +7,10 @@ description: >-
   and signals in one replay, snapshot everything one draw executed with, break the frame into passes
   and per-pass load, diff adjacent draws' pipeline state for redundant switches, time each pass
   from the GPU duration counter, and diff one target region between two draws or two captures for
-  PSNR, absolute difference, and an approximate SSIM. Use for offline graphics triage, automation
-  artifacts, CI regression gates, and finding where a frame starts producing garbage or spending
-  its time. Not for launching a capture — use renderdoc-capture. Not for why one pixel or vertex
+  PSNR, absolute difference, and an approximate SSIM, and gate those measurements or a draw's
+  pipeline state against thresholds as a pass/fail CI assertion. Use for offline graphics triage,
+  automation artifacts, CI regression gates, and finding where a frame starts producing garbage or
+  spending its time. Not for launching a capture — use renderdoc-capture. Not for why one pixel or vertex
   has the value it has — use renderdoc-debug.
 license: MIT
 compatibility: "RenderDoc 1.45+; dcc-mcp-core 0.20.14+; qrenderdoc beside renderdoccmd for the analysis tools"
@@ -18,9 +19,9 @@ metadata:
   dcc-mcp:
     dcc: renderdoc
     layer: domain
-    version: "0.3.0"
-    search-hint: "RenderDoc inspect rdc chunks thumbnail Chrome trace graphics analysis sample region NaN Inf pixel diagnosis frame overview draw call state pipeline shader bindings render passes state changes redundant switches batching pass timing diff draws captures PSNR SSIM image comparison regression CI assertion gate"
-    tags: "renderdoc,analysis,thumbnail,timeline,pixel-diagnosis,frame-overview,draw-state,render-passes,state-changes,pass-timing,diff,psnr,ssim,image-comparison,regression,graphics-debugging"
+    version: "0.4.0"
+    search-hint: "RenderDoc inspect rdc chunks thumbnail Chrome trace graphics analysis sample region NaN Inf pixel diagnosis frame overview draw call state pipeline shader bindings render passes state changes redundant switches batching pass timing diff draws captures PSNR SSIM image comparison regression CI assertion gate assert pixels state threshold pass fail verdict ignore keys"
+    tags: "renderdoc,analysis,thumbnail,timeline,pixel-diagnosis,frame-overview,draw-state,render-passes,state-changes,pass-timing,diff,psnr,ssim,image-comparison,regression,assert,ci-gate,state-assertion,graphics-debugging"
     tools: tools.yaml
     depends: "dcc-diagnostics"
 ---
@@ -55,10 +56,13 @@ This skill spans both RenderDoc backends, so check which one a tool needs before
 | `get_pass_timing` | `renderdoc.pyd` + a timing counter | how long each pass took |
 | `diff_draws` | `renderdoc.pyd` | how much one target changed between two draws of one capture |
 | `diff_captures` | `renderdoc.pyd` | how much one target changed between two captures |
+| `assert_pixels` | `renderdoc.pyd` | whether that change stays inside thresholds, as a pass/fail verdict |
+| `assert_state` | `renderdoc.pyd` | whether two events' pipeline state matches, as a pass/fail verdict |
 
-**CI assertion gate entry point:** `diff_draws` and `diff_captures` are the pixel half of a
-regression gate — both are tagged `group: verify` in `tools.yaml`. They return measured numbers and
-never raise on a mismatch, so a threshold check can be layered directly on top of their payloads.
+**CI assertion gate entry point:** four tools are tagged `group: verify` in `tools.yaml`. The two
+`diff_*` tools measure and never raise on a mismatch; the two `assert_*` tools turn those
+measurements into a verdict. Use `assert_*` when you want a gate, and `diff_*` when you want the
+numbers without one.
 
 The `renderdoccmd` baseline can convert and export, but it cannot read data back out of a capture.
 Every tool that needs readback lives in the second tier and is gated on the **deep replay backend**
@@ -85,6 +89,8 @@ on, and `renderdoc_perf__perf_capabilities` before `get_pass_timing`.
 9. `renderdoc_debug__pixel_history` — why one pixel ended up that way.
 10. `diff_draws` — did one draw change the target, and by how much.
 11. `diff_captures` — did this build change the target, and by how much.
+12. `assert_pixels` — is that change inside the tolerance, yes or no.
+13. `assert_state` — does this event still run with the same state as that one.
 
 ## What is measured and what is estimated
 
@@ -116,6 +122,39 @@ integer format, with the reason, rather than as zero anomalies.
 `analyze_state_changes` reads one pipeline state per draw, so it is bounded by `max_events` (64 by
 default): it looks at the first N draws of the range, not the whole frame, and reports
 `event_count_truncated` when there were more.
+
+## What the assertion gates decide
+
+`assert_pixels` and `assert_state` are the CI gate layer over the two diff tools. Both return a
+verdict instead of raising, so a failing build is a normal successful call that reports `passed:
+false` and lists which check failed with its measured value. Only a backend or replay problem comes
+back as an unsupported result.
+
+`assert_pixels` delegates the measurement to `diff_draws` / `diff_captures`, so there is one
+implementation of the pixel comparison and every caveat in the section below applies to it too.
+Supply **at least one** of `max_mean_abs_diff`, `min_psnr`, or `max_failed_pixel_ratio` — a gate with
+no criterion always passes, so an empty set is reported as unsupported rather than as green.
+
+- `max_*` thresholds tolerate measurements **at or below** them; `min_psnr` demands a value **at or
+  above** it. Every checked threshold is reported with its measured value.
+- **Two identical regions satisfy any `min_psnr`.** Their PSNR is infinite and therefore reported as
+  `null`, which is the best possible outcome rather than a missing measurement.
+- **`evaluable: false` means no threshold was judged.** When the two sides are not comparable,
+  nothing was measured, so the result reports `passed: false` with `evaluable: false` and the
+  reason. That is neither a pass nor a regression — treat it as a broken gate, not a green build.
+- **NaN and Inf are reported, not gated.** They are excluded from the metrics and counted under
+  `non_finite`, because they are not one of the thresholds this tool was specified to enforce. Check
+  `non_finite.excluded_texel_count` if a NaN should fail your build.
+
+`assert_state` compares the same pipeline-state fingerprint `analyze_state_changes` uses, so a
+difference it reports is a state switch that tool would have counted.
+
+- **`ignore_keys` names the sections to leave out**, which is how a gate tolerates a change it
+  expects. Ignored keys are listed in `ignored_keys`, so an ignored change is never invisible, and a
+  key you name that is not in the fingerprint is reported in `unknown_ignore_keys` rather than
+  silently accepted — that is usually a typo.
+- A key present on only one side is a difference with `null` on the missing side, because a state
+  section one replay exposes and the other does not is itself worth seeing.
 
 ## What the diff tools measure, and what they approximate
 
