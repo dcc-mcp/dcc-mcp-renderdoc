@@ -299,7 +299,7 @@ def test_assert_pixels_reports_an_unreachable_backend(monkeypatch, tmp_path):
     assert "qrenderdoc" in result["prompt"]
 
 
-def test_assert_pixels_summary_names_every_checked_threshold(backend, monkeypatch, tmp_path):
+def _summary(monkeypatch, tmp_path, right_value, thresholds):
     capture_a = tmp_path / "a.rdc"
     capture_b = tmp_path / "b.rdc"
     for path in (capture_a, capture_b):
@@ -308,19 +308,57 @@ def test_assert_pixels_summary_names_every_checked_threshold(backend, monkeypatc
         monkeypatch,
         {
             "a": _diff_controller(_flat_values(4, 0.0)),
-            "b": _diff_controller(_flat_values(4, 0.5)),
+            "b": _diff_controller(_flat_values(4, right_value)),
         },
     )
-    message = _load("assert_pixels").main(
+    return _load("assert_pixels").main(
         capture_file=str(capture_a),
         resource_id=11,
         other_capture_file=str(capture_b),
         event_id=2,
-        max_mean_abs_diff=0.01,
-        min_psnr=40.0,
-    )["message"]
-    assert "PASSED" in message or "FAILED" in message
+        **thresholds,
+    )
+
+
+@pytest.mark.parametrize(
+    "right_value,verdict,passing,total",
+    [
+        # Identical: both thresholds are satisfied.
+        (0.0, "PASSED", 2, 2),
+        # A large difference: both thresholds are breached.
+        (0.5, "FAILED", 0, 2),
+    ],
+)
+def test_assert_pixels_summary_counts_the_checks_that_passed(
+    backend, monkeypatch, tmp_path, right_value, verdict, passing, total
+):
+    """The sentence must count passes, not the number that could be judged.
+
+    When every check is evaluable the two counts happen to be equal, so a
+    numerator built from the judged checks made every failure read "N of N
+    check(s) passed" -- which is the one sentence a CI log must not emit on a
+    regression. This pins the clause rather than just the verdict word.
+    """
+    result = _summary(
+        monkeypatch, tmp_path, right_value, {"max_mean_abs_diff": 0.01, "min_psnr": 40.0}
+    )
+    message = result["message"]
+    assert "assert_pixels {}: {} of {} check(s) passed.".format(verdict, passing, total) in message
     assert "mean_abs_diff" in message and "psnr" in message
+    assert result["context"]["result"]["passed"] is (verdict == "PASSED")
+
+
+def test_assert_pixels_summary_can_report_a_partial_pass(backend, monkeypatch, tmp_path):
+    """One threshold breached and one satisfied must read 1 of 2."""
+    result = _summary(
+        monkeypatch,
+        tmp_path,
+        0.5,
+        # A tight ratio gate that the difference trips, and a loose PSNR gate
+        # that it does not.
+        {"max_failed_pixel_ratio": 0.0, "min_psnr": 1.0},
+    )
+    assert "assert_pixels FAILED: 1 of 2 check(s) passed." in result["message"]
 
 
 # --------------------------------------------------------------------------- #
@@ -429,6 +467,45 @@ def test_assert_state_ignores_the_keys_it_is_told_to(backend, monkeypatch, tmp_p
     assert payload["passed"] is True
     assert "cull_mode" in payload["ignored_keys"]
     assert "cull_mode" not in payload["compared_keys"]
+
+
+@pytest.mark.parametrize("match_by", ["event_id", "index", "name"])
+def test_assert_state_reports_event_id_matching_within_one_capture(
+    backend, monkeypatch, tmp_path, match_by
+):
+    """A single capture takes two event ids, so there is nothing to match.
+
+    The schema allows match_by alongside event_id_a/event_id_b, and the
+    resolution is pinned to event_id on that path. match_by is only a reported
+    field, but reporting a matching mode that was not used is how a caller ends
+    up believing two captures were lined up by draw index when they were not.
+    """
+    capture = tmp_path / "a.rdc"
+    capture.write_bytes(b"rdc")
+    controller = DiffController(
+        per_event={2: b"", 3: b""}, textures=[], actions=FakeController().actions
+    )
+    _fake_readback(monkeypatch, {"a": controller})
+    result = assertions.assert_state(str(capture), event_id_a=2, event_id_b=3, match_by=match_by)
+    assert result["result"]["match_by"] == "event_id"
+
+
+def test_assert_state_reports_the_matching_mode_across_captures(backend, monkeypatch, tmp_path):
+    """Across two captures the caller's matching mode is the one that applies."""
+    capture_a = tmp_path / "a.rdc"
+    capture_b = tmp_path / "b.rdc"
+    for path in (capture_a, capture_b):
+        path.write_bytes(b"rdc")
+    controllers = {
+        "a": DiffController(per_event={2: b""}, textures=[], actions=FakeController().actions),
+        "b": DiffController(per_event={2: b""}, textures=[], actions=FakeController().actions),
+    }
+    _fake_readback(monkeypatch, controllers)
+    result = assertions.assert_state(
+        str(capture_a), other_capture_file=str(capture_b), event_index=0, match_by="index"
+    )
+    assert result["result"]["match_by"] == "index"
+    assert result["result"]["mode"] == "captures"
 
 
 def test_assert_state_requires_two_events_or_a_second_capture(backend, tmp_path):

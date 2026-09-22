@@ -447,7 +447,11 @@ def assert_state(
         "supported": True,
         "operation": ASSERT_STATE,
         "mode": "captures" if other_capture_file else "events",
-        "match_by": left.get("match_by") or match_by,
+        # The bridge puts match_by on the result, not on each snapshot, so
+        # reading it off the snapshot always fell through to the caller's
+        # argument. Within one capture there is nothing to match: both event
+        # ids are given, so the resolution is event_id whatever was passed.
+        "match_by": match_by if other_capture_file else "event_id",
         "passed": not differences,
         "difference_count": len(differences),
         "differences": differences,

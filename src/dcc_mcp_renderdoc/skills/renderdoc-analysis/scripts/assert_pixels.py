@@ -90,12 +90,16 @@ def main(
         )
         text += " No threshold was judged, so this is neither a pass nor a regression."
         return skill_error(text, "unsupported_capture", **result)
+    checks = payload.get("checks") or []
+    # The numerator is the number that actually passed, not the number that
+    # could be judged. When everything is evaluable those two are the same, so
+    # counting the judged ones made every failure read "N of N check(s) passed".
     text = "assert_pixels {}: {} of {} check(s) passed.".format(
         "PASSED" if payload.get("passed") else "FAILED",
-        len(payload.get("evaluated_checks") or []),
-        len(payload.get("checks") or []),
+        sum(1 for entry in checks if entry.get("passed")),
+        len(checks),
     )
-    for entry in payload.get("checks") or []:
+    for entry in checks:
         text += " {} {} {} (measured {}).".format(
             entry["name"],
             "<=" if entry["comparison"] == "max" else ">=",
