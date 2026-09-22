@@ -155,7 +155,14 @@ the call. Consequences worth knowing:
   checked against each other **before** any texel is compared. A size, format, or API mismatch
   comes back as `comparable: false` with `reason_code` and `reason` — not as an exception, and not
 as a silently wrong number. Pass `force=true` to compare anyway; a forced comparison uses the
-  region both sides have in common and says so in `forced_reason`.
+  region both sides have in common, reading each side with **its own** row stride, and says so in
+  `forced_reason` and `force_applied`.
+- **`force` has limits.** A different `comp_count` or a different `sample_step` is *not* something
+  force can wave through: there is no cropping that makes texel `(x, y)` mean the same thing on
+  both sides, so those come back as `comparable: false` with `reason_code` of
+  `component_count_mismatch` or `sample_step_mismatch` and `metrics: null` even when you asked to
+  force. Force is an assertion that a known difference is acceptable, not a licence to compare
+  incomparable data.
 - If either capture fails to replay, the result is a structured `unsupported_capture` naming the
   side that failed. **Half a replay is never turned into a diff.**
 - `match_by` lines the two captures up: `event_id` for a known id, `index` for the Nth draw,

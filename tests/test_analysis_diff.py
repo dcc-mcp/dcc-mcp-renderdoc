@@ -9,6 +9,7 @@ two sides of a diff meet. No test here touches a GPU or a real ``.rdc``.
 
 from __future__ import annotations
 
+import builtins
 import json
 import math
 import os
@@ -342,11 +343,77 @@ def test_ssim_approx_reads_a_strided_grid_without_repeating_rows(tmp_path):
         tmp_path, [0.0, 0.0, 0.0, 1.0] * 256, [0.2, 0.0, 0.0, 1.0] * 256, width=16, height=16
     )
     dense = diff.compare_dumps(left, right, ssim_grid_step=8)
-    sparse = diff.compare_dumps(left, right, ssim_grid_step=8)
-    assert dense["ssim_block_count"] == sparse["ssim_block_count"]
-    # A 16x16 region at step 8 is a 2x2 grid of non-overlapping blocks.
+    # Step 9 is larger than the 8-pixel block, which is the case the rolling
+    # window used to get wrong: it rewound the read cursor to row 0 and
+    # silently re-read the top of the image.
+    sparse = diff.compare_dumps(left, right, ssim_grid_step=9)
+    # A 16x16 region at step 8 is a 2x2 grid of non-overlapping blocks; at
+    # step 9 the second origin (9) would overrun the block, so only one fits.
     assert dense["ssim_block_count"] == 4
+    assert sparse["ssim_block_count"] == 1
     assert dense["ssim_approx"] == pytest.approx(sparse["ssim_approx"])
+
+
+def test_ssim_approx_handles_overlapping_and_non_overlapping_grids_alike(tmp_path):
+    """A step below one block overlaps and is handled by the rolling window."""
+    left, right = _pair(
+        tmp_path, [0.0, 0.0, 0.0, 1.0] * 256, [0.2, 0.0, 0.0, 1.0] * 256, width=16, height=16
+    )
+    overlapping = diff.compare_dumps(left, right, ssim_grid_step=4)
+    disjoint = diff.compare_dumps(left, right, ssim_grid_step=8)
+    # 16x16 with an 8x8 block: step 4 gives 3x3 origins, step 8 gives 2x2.
+    assert overlapping["ssim_block_count"] == 9
+    assert disjoint["ssim_block_count"] == 4
+    assert overlapping["ssim_approx"] == pytest.approx(disjoint["ssim_approx"])
+
+
+def test_ssim_working_set_stays_bounded_by_the_block(tmp_path, monkeypatch):
+    """The row window must not retain rows between distant block origins.
+
+    A window that only ever trimmed from the front would hold one row per unit
+    of grid step, so a legal ``ssim_grid_step`` of a few thousand would cost
+    gigabytes on a 4K-wide region. The bound is asserted by counting how many
+    rows are read for how many blocks: a non-overlapping grid reads exactly one
+    block's worth of rows per block and nothing more.
+    """
+    width, height = 16, 64
+    left, right = _pair(
+        tmp_path,
+        [0.0, 0.0, 0.0, 1.0] * (width * height),
+        [0.2, 0.0, 0.0, 1.0] * (width * height),
+        width=width,
+        height=height,
+    )
+    reads = []
+    real_open = builtins.open
+
+    def counting_open(path, mode="r", *args, **kwargs):
+        handle = real_open(path, mode, *args, **kwargs)
+        if mode == "rb":
+            original_seek = handle.seek
+
+            def seek(offset, *a, **k):
+                reads.append(offset)
+                return original_seek(offset, *a, **k)
+
+            handle.seek = seek
+        return handle
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    metrics = diff.compare_dumps(left, right, ssim_grid_step=32)
+    monkeypatch.setattr(builtins, "open", real_open)
+
+    # 64 rows tall with an 8-row block: step 32 admits exactly 2 block origins.
+    assert metrics["ssim_block_count"] == 2
+    block = diff.SSIM_BLOCK_SIZE
+    ssim_seeks = reads[-(2 * block * 2) :]
+    # Only the two blocks' own rows are read -- rows 8..31 are never touched,
+    # which is what a window that only trimmed from the front would have read.
+    expected = sorted(
+        row * width * 4 * 4 for row in list(range(0, block)) + list(range(32, 32 + block))
+    )
+    assert sorted(set(ssim_seeks)) == expected
+    assert len(ssim_seeks) == 2 * block * 2
 
 
 def test_nan_and_inf_are_counted_separately_and_excluded(tmp_path):
@@ -447,6 +514,133 @@ def test_matching_sidecars_are_comparable(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Forced comparison of mismatched geometry
+#
+# These cases all have the same total byte count on both sides, so only a
+# per-side read can tell them apart. Getting this wrong is the worst failure a
+# diff tool can have: the numbers look plausible and are silently wrong.
+# --------------------------------------------------------------------------- #
+
+
+def _grid(width, height, comp_count=4, offset=0):
+    """One dump's texels: component c of texel (x, y) is y * width + x + offset."""
+    values = []
+    for y in range(height):
+        for x in range(width):
+            for c in range(comp_count):
+                values.append(float(y * width + x + offset) if c < 3 else 1.0)
+    return values
+
+
+def _reference_mean_abs_diff(left, right):
+    """Independent per-side-stride reference over the common region."""
+    lw, lh = left["width"], left["height"]
+    rw, rh = right["width"], right["height"]
+    channels = min(left["comp_count"], right["comp_count"])
+    cw, ch = min(lw, rw), min(lh, rh)
+    left_bytes = Path(left["bin_file"]).read_bytes()
+    right_bytes = Path(right["bin_file"]).read_bytes()
+    total = 0.0
+    count = 0
+    for y in range(ch):
+        for x in range(cw):
+            for c in range(channels):
+                a = struct.unpack_from(
+                    "<f", left_bytes, ((y * lw + x) * left["comp_count"] + c) * 4
+                )[0]
+                b = struct.unpack_from(
+                    "<f", right_bytes, ((y * rw + x) * right["comp_count"] + c) * 4
+                )[0]
+                total += abs(a - b)
+                count += 1
+    return total / count
+
+
+@pytest.mark.parametrize(
+    "left_size,right_size",
+    [((8, 4), (4, 8)), ((4, 8), (8, 4)), ((4, 4), (8, 2)), ((8, 2), (4, 4))],
+)
+def test_forced_comparison_reads_each_side_with_its_own_stride(tmp_path, left_size, right_size):
+    """Mismatched geometry must use per-side row strides, not the left one."""
+    lw, lh = left_size
+    rw, rh = right_size
+    left = _write_dump(tmp_path, "left", _grid(lw, lh), width=lw, height=lh)
+    right = _write_dump(tmp_path, "right", _grid(rw, rh, offset=100), width=rw, height=rh)
+    # Both sides are the same size in bytes, so only a per-side read can
+    # distinguish them -- a shared stride silently produces a wrong answer.
+    assert left["byte_size"] == right["byte_size"]
+    metrics = diff.compare_dumps(left, right, ssim_grid_step=8)
+    assert metrics["mean_abs_diff"] == pytest.approx(_reference_mean_abs_diff(left, right))
+    assert metrics["compared_region"]["cropped"] is True
+
+
+def test_each_side_is_size_checked_against_its_own_sidecar(tmp_path):
+    """A right dump shorter than its own sidecar claims must be caught."""
+    left = _write_dump(tmp_path, "left", [0.0] * 16)
+    right = _write_dump(tmp_path, "right", [0.0] * 16)
+    # Left is 2x2x4 = 64 bytes; shrink right so only its sidecar mismatches.
+    (tmp_path / "right.bin").write_bytes(b"\x00" * 32)
+    with pytest.raises(replay.RenderDocError, match="its own sidecar declares"):
+        diff.compare_dumps(left, right, ssim_grid_step=8)
+
+
+@pytest.mark.parametrize(
+    "key,value,expected_code",
+    [
+        ("comp_count", 3, "component_count_mismatch"),
+        ("sample_step", 4, "sample_step_mismatch"),
+    ],
+)
+def test_unreconcilable_mismatches_are_rejected_even_when_forced(
+    tmp_path, key, value, expected_code
+):
+    """A component-count or stride difference is not something force may wave through."""
+    left = _write_dump(tmp_path, "left", [0.0] * 16)
+    right = _write_dump(tmp_path, "right", [0.0] * 16)
+    right[key] = value
+    mismatch = diff._unforceable_mismatch(left, right)
+    assert mismatch["reason_code"] == expected_code
+    assert mismatch["reason"]
+    # compare_dumps refuses outright rather than returning a plausible number.
+    with pytest.raises(replay.RenderDocError):
+        diff.compare_dumps(left, right, ssim_grid_step=8)
+
+
+def test_component_count_mismatch_beats_force_end_to_end(reachable_backend, monkeypatch, tmp_path):
+    """Through diff_region, an unreconcilable mismatch reports comparable=false."""
+    capture_a = tmp_path / "a.rdc"
+    capture_b = tmp_path / "b.rdc"
+    for path in (capture_a, capture_b):
+        path.write_bytes(b"rdc")
+    # Side b is a three-component target, so the dumps have no shared channel
+    # layout. This is a real difference between the two readbacks, not a
+    # patched sidecar.
+    _fake_readback(
+        monkeypatch,
+        {
+            "a": _diff_controller(_flat_values(4, 0.0)),
+            "b": _channel_controller(3, 4, 0.0),
+        },
+    )
+    result = diff.diff_region(
+        diff.DIFF_CAPTURES,
+        str(capture_a),
+        other_capture_file=str(capture_b),
+        resource_id=11,
+        event_ids=[2],
+        force=True,
+    )
+    payload = result["result"]
+    assert payload["supported"] is True
+    assert payload["comparable"] is False
+    assert payload["reason_code"] == "component_count_mismatch"
+    assert payload["force"] is True
+    assert payload["force_applied"] is False
+    # No metrics: force cannot conjure a comparison that has no shared layout.
+    assert payload["metrics"] is None
+
+
+# --------------------------------------------------------------------------- #
 # Host: orchestration
 # --------------------------------------------------------------------------- #
 
@@ -494,6 +688,16 @@ class _ApiController(DiffController):
 
 def _diff_controller(values, event_id=2, api="GraphicsAPI.D3D11", size=2):
     texture, data = _float_texture(11, "colour", size, size, values)
+    return _ApiController(api, per_event={event_id: data}, textures=[texture])
+
+
+def _channel_controller(comp_count, texels, value, event_id=2, api="GraphicsAPI.D3D11", size=2):
+    """A controller whose target reports ``comp_count`` components per texel."""
+    texture = _texture(11, "colour", size, size)
+    texture.format = _format(count=comp_count, width=4)
+    data = struct.pack(
+        "<{}f".format(texels * comp_count), *([float(value)] * (texels * comp_count))
+    )
     return _ApiController(api, per_event={event_id: data}, textures=[texture])
 
 

@@ -248,12 +248,42 @@ def _ssim_from_block(moments: _Moments, max_value: float) -> float:
     return numerator / denominator
 
 
+def _unforceable_mismatch(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> Optional[Dict[str, str]]:
+    """Report a mismatch that ``force`` must not be allowed to override.
+
+    A width or height difference can be honestly handled by comparing only the
+    region both sides have in common. A different component count or a different
+    sampling stride cannot: there is no cropping or per-side stride that makes
+    texel ``(x, y)`` mean the same thing on both sides, so any number produced
+    would be quietly wrong. ``force`` is an assertion that a *known* difference
+    is acceptable, not a licence to compare incomparable data.
+    """
+    if int(left.get("comp_count") or 0) != int(right.get("comp_count") or 0):
+        return {
+            "reason_code": "component_count_mismatch",
+            "reason": "the two sides read {} and {} component(s) per texel, so there is no "
+            "shared channel layout to compare; force cannot reconcile them".format(
+                left.get("comp_count"), right.get("comp_count")
+            ),
+        }
+    if int(left.get("sample_step") or 0) != int(right.get("sample_step") or 0):
+        return {
+            "reason_code": "sample_step_mismatch",
+            "reason": "the two sides sampled every {}th and every {}th texel, so the same "
+            "index names a different source texel on each side; force cannot "
+            "reconcile them".format(left.get("sample_step"), right.get("sample_step")),
+        }
+    return None
+
+
 def _ssim_approx(
     left_path: str,
     right_path: str,
     *,
-    width: int,
-    height: int,
+    left_width: int,
+    right_width: int,
     comp_count: int,
     channels: Sequence[int],
     grid_step: int,
@@ -263,10 +293,14 @@ def _ssim_approx(
 ) -> Dict[str, Any]:
     """Average SSIM over 8x8 blocks on a sampling grid.
 
-    The blocks are read stripe by stripe behind a rolling window of
-    ``SSIM_BLOCK_SIZE`` rows, so the pass costs a handful of rows of memory
-    whatever the image is -- which is the whole reason the approximation exists
-    rather than a full-resolution sliding-window SSIM.
+    Each side is read with *its own* row stride: two dumps that declare
+    different widths do not share a byte layout, so a stride taken from one of
+    them would seek the other to the wrong rows.
+
+    Memory is bounded by the block, not by the grid step. When the step is at
+    least one block the blocks cannot overlap, so each block's rows are read and
+    dropped immediately; only a step smaller than a block needs a rolling
+    window, and that window holds fewer than two blocks of rows.
     """
     block = SSIM_BLOCK_SIZE
     result: Dict[str, Any] = {
@@ -288,43 +322,58 @@ def _ssim_approx(
         return result
     row_floats = crop_width * comp_count
     row_bytes = row_floats * 4
-    stride = width * comp_count * 4
+    left_stride = left_width * comp_count * 4
+    right_stride = right_width * comp_count * 4
     total = 0.0
     counted = 0
     skipped = 0
-    window: List[Tuple[Sequence[float], Sequence[float]]] = []
-    next_row = 0
+
+    def read_row(row_index):
+        left_handle.seek(row_index * left_stride)
+        right_handle.seek(row_index * right_stride)
+        return (
+            struct.unpack("<{}f".format(row_floats), left_handle.read(row_bytes)),
+            struct.unpack("<{}f".format(row_floats), right_handle.read(row_bytes)),
+        )
+
+    def accumulate(rows):
+        """Fold every block of one block-row into the running SSIM total."""
+        nonlocal total, counted, skipped
+        for origin_x in range(0, crop_width - block + 1, grid_step):
+            pairs: List[Tuple[float, float]] = []
+            for row_left, row_right in rows:
+                base = origin_x * comp_count
+                for offset in range(block):
+                    for channel in channels:
+                        index = base + offset * comp_count + channel
+                        pairs.append((row_left[index], row_right[index]))
+            moments = _block_moments(pairs)
+            if moments is None:
+                skipped += 1
+                continue
+            total += _ssim_from_block(moments, max_value)
+            counted += 1
+
+    origins = range(0, crop_height - block + 1, grid_step)
     with open(left_path, "rb") as left_handle, open(right_path, "rb") as right_handle:
-        for origin_y in range(0, crop_height - block + 1, grid_step):
-            while next_row < origin_y + block and next_row < crop_height:
-                left_handle.seek(next_row * stride)
-                right_handle.seek(next_row * stride)
-                window.append(
-                    (
-                        struct.unpack("<{}f".format(row_floats), left_handle.read(row_bytes)),
-                        struct.unpack("<{}f".format(row_floats), right_handle.read(row_bytes)),
-                    )
-                )
-                next_row += 1
-            while window and next_row - len(window) < origin_y:
-                window.pop(0)
-            if len(window) < block:
-                break
-            rows = window[:block]
-            for origin_x in range(0, crop_width - block + 1, grid_step):
-                pairs: List[Tuple[float, float]] = []
-                for row_left, row_right in rows:
-                    base = origin_x * comp_count
-                    for offset in range(block):
-                        for channel in channels:
-                            index = base + offset * comp_count + channel
-                            pairs.append((row_left[index], row_right[index]))
-                moments = _block_moments(pairs)
-                if moments is None:
-                    skipped += 1
-                    continue
-                total += _ssim_from_block(moments, max_value)
-                counted += 1
+        if grid_step >= block:
+            # Blocks cannot overlap, so nothing has to be retained between them.
+            for origin_y in origins:
+                accumulate([read_row(index) for index in range(origin_y, origin_y + block)])
+        else:
+            # Overlapping blocks share rows, so a short rolling window saves
+            # re-reading them. It holds fewer than block + grid_step rows.
+            window: List[Tuple[Sequence[float], Sequence[float]]] = []
+            next_row = 0
+            for origin_y in origins:
+                while next_row < origin_y + block and next_row < crop_height:
+                    window.append(read_row(next_row))
+                    next_row += 1
+                while window and next_row - len(window) < origin_y:
+                    window.pop(0)
+                if len(window) < block:
+                    break
+                accumulate(window[:block])
     if not counted:
         result["ssim_skipped_reason"] = (
             "no {}x{} block on the sampling grid held only finite values".format(block, block)
@@ -354,10 +403,15 @@ def compare_dumps(
     would otherwise make the PSNR read "identical" or "infinitely bad" with
     nothing in between. SSIM is a second pass with its own rolling window.
     """
-    width = int(left.get("width") or 0)
-    height = int(left.get("height") or 0)
+    unforceable = _unforceable_mismatch(left, right)
+    if unforceable is not None:
+        raise RenderDocError(unforceable["reason"])
+    left_width = int(left.get("width") or 0)
+    left_height = int(left.get("height") or 0)
     comp_count = int(left.get("comp_count") or 0)
-    if width <= 0 or height <= 0 or comp_count <= 0:
+    right_width = int(right.get("width") or left_width)
+    right_height = int(right.get("height") or left_height)
+    if min(left_width, left_height, right_width, right_height) <= 0 or comp_count <= 0:
         raise RenderDocError("both dumps must describe a non-empty region")
     if threshold <= 0.0:
         raise RenderDocError("threshold must be greater than zero")
@@ -366,18 +420,22 @@ def compare_dumps(
     selected = _select_channels(comp_count, channels)
     grid_step = max(1, int(ssim_grid_step))
     # A forced comparison of two differently sized dumps compares the region
-    # they have in common rather than pretending the sizes agreed.
-    crop_width = min(width, int(right.get("width") or width))
-    crop_height = min(height, int(right.get("height") or height))
+    # they have in common rather than pretending the sizes agreed. Cropping the
+    # width does not give the two files a shared byte layout, so each side is
+    # still read with its own row stride.
+    crop_width = min(left_width, right_width)
+    crop_height = min(left_height, right_height)
     left_path = str(left.get("bin_file") or "")
     right_path = str(right.get("bin_file") or "")
-    for path in (left_path, right_path):
+    for path, sidecar in ((left_path, left), (right_path, right)):
         if not os.path.isfile(path):
             raise RenderDocError("texel dump is missing: {}".format(path))
-        if os.path.getsize(path) != int(left.get("byte_size") or 0):
+        declared = int(sidecar.get("byte_size") or 0)
+        actual = os.path.getsize(path)
+        if actual != declared:
             raise RenderDocError(
-                "texel dump {} is {} byte(s), not the {} its sidecar declares".format(
-                    path, os.path.getsize(path), left.get("byte_size")
+                "texel dump {} is {} byte(s), not the {} its own sidecar declares".format(
+                    path, actual, declared
                 )
             )
 
@@ -397,7 +455,8 @@ def compare_dumps(
 
     row_floats = crop_width * comp_count
     row_bytes = row_floats * 4
-    stride = width * comp_count * 4
+    left_stride = left_width * comp_count * 4
+    right_stride = right_width * comp_count * 4
     rows_per_read = max(1, COMPARE_ROWS_PER_READ)
     with open(left_path, "rb") as left_handle, open(right_path, "rb") as right_handle:
         for row_start in range(0, crop_height, rows_per_read):
@@ -406,8 +465,8 @@ def compare_dumps(
             right_values: List[float] = []
             for offset in range(count):
                 row = row_start + offset
-                left_handle.seek(row * stride)
-                right_handle.seek(row * stride)
+                left_handle.seek(row * left_stride)
+                right_handle.seek(row * right_stride)
                 left_values.extend(
                     struct.unpack("<{}f".format(row_floats), left_handle.read(row_bytes))
                 )
@@ -512,15 +571,20 @@ def compare_dumps(
             "height": crop_height,
             "comp_count": comp_count,
             "texel_count": crop_width * crop_height,
-            "cropped": bool(crop_width != width or crop_height != height),
+            "cropped": bool(
+                crop_width != left_width
+                or crop_height != left_height
+                or right_width != left_width
+                or right_height != left_height
+            ),
         },
     }
     metrics.update(
         _ssim_approx(
             left_path,
             right_path,
-            width=width,
-            height=height,
+            left_width=left_width,
+            right_width=right_width,
             comp_count=comp_count,
             channels=selected,
             grid_step=grid_step,
@@ -889,9 +953,13 @@ def diff_region(
 
         left, right = sources[0], sources[1]
         mismatch = compare_sidecars(left, right)
+        # Checked before the soft mismatch: a component-count or stride
+        # difference is not something force may override, so it is reported as
+        # not comparable even when the caller asked to force the comparison.
+        unforceable = _unforceable_mismatch(left, right)
         result: Dict[str, Any] = {
             "supported": True,
-            "comparable": mismatch is None,
+            "comparable": mismatch is None and unforceable is None,
             "force": bool(force),
             "match_by": left.get("match_by") or match_by,
             "sides": [_side_report("left", left), _side_report("right", right)],
@@ -900,16 +968,29 @@ def diff_region(
             "estimate": bool(left.get("estimate")),
             "estimate_method": left.get("estimate_method"),
         }
+        if unforceable is not None:
+            result.update(unforceable)
+            result["force_applied"] = False
+            result["metrics"] = None
+            return {
+                "capture_file": str(capture_file),
+                "operation": operation,
+                "result": result,
+            }
         if mismatch is not None:
             result.update(mismatch)
             if not force:
                 result["metrics"] = None
+                result["force_applied"] = False
                 return {
                     "capture_file": str(capture_file),
                     "operation": operation,
                     "result": result,
                 }
             result["forced_reason"] = result["reason"]
+            result["force_applied"] = True
+        else:
+            result["force_applied"] = bool(force) and mismatch is not None
         try:
             result["metrics"] = compare_dumps(
                 left,
@@ -927,8 +1008,9 @@ def diff_region(
                 {
                     "supported": False,
                     "error_message": str(exc),
-                    "hint": "the two dumps could not be compared; retry with a smaller "
-                    "region or a lower max_texels",
+                    "hint": "the two dumps could not be compared; check that both sides "
+                    "describe the same component count and sampling stride, or retry "
+                    "with a smaller region or a lower max_texels",
                 },
             )
     return {"capture_file": str(capture_file), "operation": operation, "result": result}
