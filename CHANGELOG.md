@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.8.0...v0.9.0) (2026-09-22)
+
+
+### Features
+
+* add assert_pixels and assert_state CI assertion gates ([8783a9b](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/8783a9bbb5587078cc04459e606ec3f58001690f))
+* add diff_draws and diff_captures image comparison tools ([a60471a](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/a60471a29cdb12c4698534e050204a7f4442c643))
+
 ## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.7.0...v0.8.0) (2026-09-19)
 
 
