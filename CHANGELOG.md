@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.0...v0.9.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **install:** resolve the Install SOP schema artifact from the loader, and pin the PyPI publish action ([89ce0a7](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/89ce0a7eaeab185ac768534906bea2f1c1610c4a))
+
 ## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.8.0...v0.9.0) (2026-09-22)
 
 
