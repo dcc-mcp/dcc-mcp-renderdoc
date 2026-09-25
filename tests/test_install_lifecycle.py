@@ -64,7 +64,8 @@ def test_install_contract_uses_official_core_loader_and_resource():
     loaded = install_contract.load_install_sop_schema()
     schema_id = loaded["$id"]
     artifact_name = schema_id.rsplit("/", 1)[-1]
-    schema_bytes = importlib.resources.files("dcc_mcp_core").joinpath("schemas", artifact_name).read_bytes()
+    schema_resource = importlib.resources.files("dcc_mcp_core").joinpath("schemas", artifact_name)
+    schema_bytes = schema_resource.read_bytes()
     schema = json.loads(schema_bytes)
     assert schema == loaded
     assert schema["$id"] == schema_id
