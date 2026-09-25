@@ -58,16 +58,16 @@ def test_install_contract_uses_official_core_loader_and_resource():
     from dcc_mcp_renderdoc import install_contract
 
     assert install_contract.load_install_sop_schema is deployment.load_install_sop_schema
-    schema_bytes = (
-        importlib.resources.files("dcc_mcp_core")
-        .joinpath("schemas", "adapter-install-sop-v1.schema.json")
-        .read_bytes()
-    )
-    # The schema is owned by dcc-mcp-core and grows between releases, so assert
-    # the resource and the loader agree instead of pinning its size or digest.
+    # The schema is owned by dcc-mcp-core and is republished under a new `-vN`
+    # artifact name whenever its identity changes, so resolve the current
+    # artifact from the loader rather than pinning a single revision.
+    loaded = install_contract.load_install_sop_schema()
+    schema_id = loaded["$id"]
+    artifact_name = schema_id.rsplit("/", 1)[-1]
+    schema_bytes = importlib.resources.files("dcc_mcp_core").joinpath("schemas", artifact_name).read_bytes()
     schema = json.loads(schema_bytes)
-    assert schema == install_contract.load_install_sop_schema()
-    assert schema["$id"] == "https://dcc-mcp.github.io/schemas/adapter-install-sop-v1.schema.json"
+    assert schema == loaded
+    assert schema["$id"] == schema_id
     Draft202012Validator.check_schema(install_contract.load_install_sop_schema())
 
 
