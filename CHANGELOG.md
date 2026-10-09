@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.1...v0.9.2) (2026-10-09)
+
+
+### Documentation
+
+* **readme:** add the generated DCC-MCP host matrix pointer ([fb1f662](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/fb1f66205ef76ab06c97bde8efd04ad16be13c7e))
+* **readme:** regenerate the DCC-MCP host matrix pointer for 47 adapters ([1258c41](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/1258c419f0c2adccab028025881f82ec76e908ea))
+* refresh host adapter count pointer block (renderdoc) ([4e4d981](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/4e4d9812246db201284db870e602dca86c76e072))
+
 ## [0.9.1](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.0...v0.9.1) (2026-09-25)
 
 
