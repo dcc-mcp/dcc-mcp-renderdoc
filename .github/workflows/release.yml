@@ -17,10 +17,20 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      - name: Require organization release token
+        shell: bash
+        env:
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [[ -z "${PERSONAL_ACCESS_TOKEN:-}" ]]; then
+            echo "::error::Organization secret PERSONAL_ACCESS_TOKEN is required for release PRs to trigger CI."
+            exit 1
+          fi
+
       - id: release
         uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || github.token }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
