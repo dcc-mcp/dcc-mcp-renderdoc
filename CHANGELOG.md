@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.3](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.2...v0.9.3) (2026-11-24)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([530bc2a](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/530bc2a2f61909e7b4957e45f57f4c6051771099))
+* refresh the generated DCC-MCP host matrix pointer ([bde151c](https://github.com/dcc-mcp/dcc-mcp-renderdoc/commit/bde151c82af8c2ec37b2cafa76a8c374aa0a975d))
+
 ## [0.9.2](https://github.com/dcc-mcp/dcc-mcp-renderdoc/compare/v0.9.1...v0.9.2) (2026-10-17)
 
 
